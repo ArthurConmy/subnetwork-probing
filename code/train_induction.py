@@ -143,7 +143,7 @@ def train_induction(
 ):
     wandb.init(
         project="subnetwork-probing",
-        entity="acdcremix",
+        entity="remix_school-of-rock",
         config={"epochs": epochs, "mask_lr": mask_lr, "lambda_reg": lambda_reg},
     )
     (
