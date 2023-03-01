@@ -22,7 +22,7 @@ def get_induction_dataset():
     try:
         with open(
             os.path.expanduser(
-                "/home/ubuntu/induction/data/masks/mask_repeat_candidates.pkl"
+                "~/induction/data/masks/mask_repeat_candidates.pkl"
             ),
             "rb",
         ) as f:
@@ -509,7 +509,8 @@ def get_ACDC_correspondece():
             # t[1] has 132, 136, 176 available...
             # if induction is AB...AB, B tokens are on 133(OK...), 137, 177
             # OK so this is where we punish losses
-    except:
+    except Exception as e:
+        print(e)
         raise Exception(
             "Have you cloned https://github.com/aryamanarora/induction ??? It is where all the masks are kept !!!"
         )

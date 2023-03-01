@@ -308,6 +308,9 @@ if __name__ == "__main__":
     percentage_binary_list = []
     number_of_edges = []
 
+    # shuffle the regularization params
+    regularization_params = np.random.permutation(regularization_params)        
+
     for a_regulation_param in regularization_params:
         for task in ["IOI"]:
             model.freeze_weights()
@@ -335,8 +338,8 @@ if __name__ == "__main__":
     # make sure that the input data makes sense
     # make sure that the model makes correct predictions
     # brainstorm more
-    #
-    wandb.init(project="pareto-subnetwork-probing", entity="acdcremix")
+    
+    wandb.init(project="arthur_pareto_subnetwork_probing", entity="remix_school-of-rock")
     import plotly.express as px
 
     df = pd.DataFrame(
