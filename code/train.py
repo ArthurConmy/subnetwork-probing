@@ -116,7 +116,7 @@ def train_ioi(
 ):
     wandb.init(
         project="subnetwork-probing",
-        entity="acdcremix",
+        entity="remix_school-of-rock",
         config={"epochs": epochs, "mask_lr": mask_lr, "lambda_reg": lambda_reg},
     )
     # blackbox this bit
@@ -288,7 +288,7 @@ if __name__ == "__main__":
             sanity_check_with_transformer_lens(mask_val_dict)
             wandb.finish()
 
-    wandb.init(project="pareto-subnetwork-probing", entity="acdcremix")
+    wandb.init(project="pareto-subnetwork-probing", entity="remix_school-of-rock")
     import pandas as pd
     import plotly.express as px
 

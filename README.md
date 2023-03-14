@@ -6,6 +6,23 @@ cd subnetwork-probing/transformer_lens
 pip install -e .
 ```
 
+Then you will need to install `mlab2/` (which requires Redwood or REMIX access, it's NOT the same repo as this: https://github.com/redwoodresearch/mlab2)
+
+In the directory containing `mlab2/`, make a file called `setup.py` and add this:
+
+```
+import setuptools
+
+setuptools.setup(
+    name="mlab2",
+    version="0.1",
+    packages=["mlab2"],
+    package_dir={"mlab2": "mlab2"},
+)
+```
+
+Then run `pip install -e .` in this directory
+
 # TODO
 
 [ ] Sort out `transformer_lens` as a submodule for code release.
