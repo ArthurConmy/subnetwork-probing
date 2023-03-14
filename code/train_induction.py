@@ -2,7 +2,7 @@
 from copy import deepcopy
 from functools import partial
 from typing import Dict, List
-
+from collections import defaultdict, OrderedDict
 import numpy as np
 import pandas as pd
 import torch
@@ -156,9 +156,9 @@ def do_random_resample_caching(
 
 #%% [markdown]
 # will become train edge induction, but for now prototype in notebook
-model = induction_model = get_induction_model()
-induction_model.set_use_split_qkv_input(True)
-induction_model.set_use_attn_result(True)
+model = model = get_induction_model()
+model.set_use_split_qkv_input(True)
+model.set_use_attn_result(True)
 
 #%%
 
@@ -183,47 +183,110 @@ for hp in model.hook_dict.values():
     _,
     mask_reshaped,
 ) = get_induction_dataset()
-
 #%%
 
 corrupt_cache = {}
-induction_model.cache_all(corrupt_cache)
-induction_model(patch_data_tensor)
+model.cache_all(corrupt_cache)
 
-for value in corrupt_cache.values():
-    value.to("cpu")
+def norm_peeker(z, hook):
+    print(hook.name, z.norm().item())
+    return z
+for name in model.hook_dict:
+    model.add_hook(name, norm_peeker)
+bad_logits = model(patch_data_tensor)
+model.reset_hooks()
 
-induction_model.corrupt_cache = {k: v.cpu() for k, v in corrupt_cache.items()}
+model.corrupt_cache = {k: v.cpu() for k, v in corrupt_cache.items()}
 del corrupt_cache
 torch.cuda.empty_cache()
 
 #%%
 
-receivers_to_senders = {}
+receivers_to_senders = OrderedDict()
 all_senders = [
     ("blocks.0.hook_resid_pre", (None,)),
 ]
 
-for layer_index in range(induction_model.cfg.n_layers):
-    for head_index in range(induction_model.cfg.n_heads):
+for layer_index in range(model.cfg.n_layers):
+    for head_index in range(model.cfg.n_heads):
         for letter in "qkv":
-            receiver = (f"blocks.{layer_index}.attn.hook_{letter}_input", (None, None, head_index))
+            receiver = (f"blocks.{layer_index}.hook_{letter}_input", (None, None, head_index))
             receivers_to_senders[receiver] = []
             for sender in all_senders:
                 receivers_to_senders[receiver].append(sender)
     finally_the_sender = f"blocks.{layer_index}.attn.hook_result"
-    for head_index in range(induction_model.cfg.n_heads):
+    for head_index in range(model.cfg.n_heads):
         all_senders.append((finally_the_sender, (None, None, head_index)))
 
-receiver = (f"blocks.{induction_model.cfg.n_layers-1}.hook_resid_post", (None,))
+receiver = (f"blocks.{model.cfg.n_layers-1}.hook_resid_post", (None,))
 receivers_to_senders[receiver] = []
 for sender in all_senders:
     receivers_to_senders[receiver].append(sender)
 
 #%%
 
+names_senders = list(set([name for name, _ in all_senders]))
+
+def saver_hook(z, hook):
+    hook.global_cache[hook.name] = z
+    return z
+
+for name in names_senders:
+    model.add_hook(
+        name=name,
+        hook=saver_hook,
+    )
+
+#%%
+
+# test run to see what happens, do things actually save
+td = model(train_data_tensor)
+
+#%% 
+
+# do a mini test: if we use all the patched activations, what happens?
+def editor_hook(z, hook):
+    curz = z.clone() 
+
+    for sender, slice_tuple in receivers_to_senders[hook.name]:
+        slice_slice = slice(*slice_tuple)
+        curz[slice_tuple] -= hook.global_cache[sender][slice_slice]
+        curz += hook.global_cache.corrupt_cache[sender][slice_slice]
+    
+    print(hook.name, curz.norm().item())
+    return curz
+
+all_receivers = list(receivers_to_senders.keys())
+all_receivers_names = [name for name, _ in all_receivers]
+
+model.reset_hooks()
+hooks=[]
+for name in all_receivers_names:
+    # hooks.append((name, editor_hook))
+    model.add_hook(
+        name=name,
+        hook=editor_hook,
+    )
+
+assert len(model.hook_dict[all_receivers_names[-1]].fwd_hooks) > 0, (all_receivers_names[-1], "should surely have had a hook added")
+
+#%%
+
+out = model(train_data_tensor)
+#     fwd_hooks = hooks,
+# )
+
+assert False, "WHY IS THERE NO PRINTING OUT OF NORMS HERE???"
+
+#%%
+
+assert list(out.shape) == list(bad_logits.shape), f"{out.shape} != {bad_logits.shape}"
+assert torch.allclose(out, bad_logits), (out.norm(), bad_logits.norm())
+
+#%%
+
 def train_induction(
-    induction_model, mask_lr=0.01, epochs=30, verbose=True, lambda_reg=100,
+    model, mask_lr=0.01, epochs=30, verbose=True, lambda_reg=100,
 ):
 
     wandb.init(
@@ -243,13 +306,13 @@ def train_induction(
     # one parameter per thing that is masked
     mask_params = [
         p
-        for n, p in induction_model.named_parameters()
+        for n, p in model.named_parameters()
         if "mask_scores" in n and p.requires_grad
     ]
     # parameters for the probe (we don't use a probe)
     model_params = [
         p
-        for n, p in induction_model.named_parameters()
+        for n, p in model.named_parameters()
         if "mask_scores" not in n and p.requires_grad
     ]
     assert len(model_params) == 0, ("MODEL should be empty", model_params)
@@ -257,17 +320,17 @@ def train_induction(
     log = []
 
     for epoch in tqdm(range(epochs)):  # tqdm.notebook.tqdm(range(epochs)):
-        induction_model = do_random_resample_caching(induction_model, patch_data_tensor)
-        induction_model.train()
+        model = do_random_resample_caching(model, patch_data_tensor)
+        model.train()
         trainer.zero_grad()
         # compute loss, also log other metrics
         # logit_diff_term = negative_log_probs(
-        #     dataset, induction_model(train_data_tensor), mask_reshaped
+        #     dataset, model(train_data_tensor), mask_reshaped
         # )
         logit_diff_term = kl_divergence(
-            dataset, induction_model(train_data_tensor), mask_reshaped
+            dataset, model(train_data_tensor), mask_reshaped
         )
-        regularizer_term = regularizer(induction_model)
+        regularizer_term = regularizer(model)
         loss = logit_diff_term + regularizer_term * lambda_reg
         loss.backward()
 
@@ -283,10 +346,10 @@ def train_induction(
         log.append({"loss_val": loss.item()})
 
         if epoch % 10 == 0:
-            number_of_nodes, nodes_to_mask = visualize_mask(induction_model)
+            number_of_nodes, nodes_to_mask = visualize_mask(model)
     # wandb.finish()
     # torch.save(model.state_dict(), "masked_model.pt")
-    return log, induction_model, number_of_nodes, logit_diff_term, nodes_to_mask
+    return log, model, number_of_nodes, logit_diff_term, nodes_to_mask
 
 
 # check regularizer can set all the

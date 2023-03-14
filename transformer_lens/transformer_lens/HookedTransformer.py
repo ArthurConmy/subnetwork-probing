@@ -43,9 +43,8 @@ class Output(NamedTuple):
     loss: Loss
 
 
-class GlobalCache:
+class GlobalCache(dict):
     def __init__(self):
-        self.acts = {}
         self.corrupt_cache = None
         # self.params = {
         #   {receiver: {sender: param, ...}} # oh boy so many dictionaries
