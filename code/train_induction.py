@@ -1,6 +1,4 @@
-# import os
-# os.chdir("/home/ubuntu/mlab2_https/mlab2/")
-
+#%%
 from copy import deepcopy
 from functools import partial
 from typing import Dict, List
@@ -8,14 +6,15 @@ from typing import Dict, List
 import numpy as np
 import pandas as pd
 import torch
+import warnings
 import torch.nn.functional as F
 import transformer_lens.utils as utils
 import wandb
 from interp.circuit.causal_scrubbing.dataset import Dataset
 from tqdm import tqdm
 from transformer_lens.HookedTransformer import HookedTransformer
+from transformer_lens.hook_points import HookPoint, MaskedHookPoint
 from transformer_lens.ioi_dataset import IOIDataset
-
 from induction_utils import (
     get_induction_dataset,
     get_induction_model,
@@ -155,6 +154,73 @@ def do_random_resample_caching(
 
     return model
 
+#%% [markdown]
+# will become train edge induction, but for now prototype in notebook
+model = induction_model = get_induction_model()
+induction_model.set_use_split_qkv_input(True)
+induction_model.set_use_attn_result(True)
+
+#%%
+
+# turn off Augustine's node subnetwork probing
+for hp in model.hook_dict.values():
+    if isinstance(hp, MaskedHookPoint):
+        hp.is_disabled = True
+#%%
+
+# verify that:
+for hp in model.hook_dict.values():
+    if isinstance(hp, MaskedHookPoint):
+        assert hp.is_disabled
+
+#%%
+
+(
+    train_data_tensor,
+    patch_data_tensor,
+    dataset,
+    _,
+    _,
+    mask_reshaped,
+) = get_induction_dataset()
+
+#%%
+
+corrupt_cache = {}
+induction_model.cache_all(corrupt_cache)
+induction_model(patch_data_tensor)
+
+for value in corrupt_cache.values():
+    value.to("cpu")
+
+induction_model.corrupt_cache = {k: v.cpu() for k, v in corrupt_cache.items()}
+del corrupt_cache
+torch.cuda.empty_cache()
+
+#%%
+
+receivers_to_senders = {}
+all_senders = [
+    ("blocks.0.hook_resid_pre", (None,)),
+]
+
+for layer_index in range(induction_model.cfg.n_layers):
+    for head_index in range(induction_model.cfg.n_heads):
+        for letter in "qkv":
+            receiver = (f"blocks.{layer_index}.attn.hook_{letter}_input", (None, None, head_index))
+            receivers_to_senders[receiver] = []
+            for sender in all_senders:
+                receivers_to_senders[receiver].append(sender)
+    finally_the_sender = f"blocks.{layer_index}.attn.hook_result"
+    for head_index in range(induction_model.cfg.n_heads):
+        all_senders.append((finally_the_sender, (None, None, head_index)))
+
+receiver = (f"blocks.{induction_model.cfg.n_layers-1}.hook_resid_post", (None,))
+receivers_to_senders[receiver] = []
+for sender in all_senders:
+    receivers_to_senders[receiver].append(sender)
+
+#%%
 
 def train_induction(
     induction_model, mask_lr=0.01, epochs=30, verbose=True, lambda_reg=100,
@@ -387,3 +453,4 @@ if __name__ == "__main__":
     plt.update_layout(xaxis_title="Number of Nodes", yaxis_title="KL")
     wandb.log({"number_of_nodes": plt})
     wandb.finish()
+#%%

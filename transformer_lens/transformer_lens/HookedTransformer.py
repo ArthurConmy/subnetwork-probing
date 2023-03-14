@@ -3,6 +3,7 @@ from typing_extensions import Literal
 from torchtyping import TensorType as TT
 import torch
 import torch.nn as nn
+import warnings
 import torch.nn.functional as F
 import numpy as np
 import einops
@@ -45,6 +46,21 @@ class Output(NamedTuple):
 class GlobalCache:
     def __init__(self):
         self.acts = {}
+        self.corrupt_cache = None
+        # self.params = {
+        #   {receiver: {sender: param, ...}} # oh boy so many dictionaries
+        # }
+        # # this makes it easy to get the trainable parameters out
+
+        # OK so then we need to make a list of things to save...
+        # and a list of things to load...
+        # don't do the QKV version for now. So also need to run naive ACDC version that is just on the heads...
+
+def sample_mask_param(param): # where does this go???
+    pass
+
+def hook_func(z, hook):
+    pass
 
 class HookedTransformer(HookedRootModule):
     """
@@ -313,13 +329,16 @@ class HookedTransformer(HookedRootModule):
         for i, block in enumerate(transformer_block_list):  # type: ignore
             # Note that each block includes skip connections, so we don't need
             # residual + block(residual)
-            residual = block(
-                residual,
-                past_kv_cache_entry=past_kv_cache[i]
-                if past_kv_cache is not None
-                else None,  # Cache is contains a list of HookedTransformerKeyValueCache objects, one for each block
-                shortformer_pos_embed=shortformer_pos_embed,
-            )  # [batch, pos, d_model]
+            try:
+                residual = block(
+                    residual,
+                    past_kv_cache_entry=past_kv_cache[i]
+                    if past_kv_cache is not None
+                    else None,  # Cache is contains a list of HookedTransformerKeyValueCache objects, one for each block
+                    shortformer_pos_embed=shortformer_pos_embed,
+                )  # [batch, pos, d_model]
+            except:
+                pass
 
         if stop_at_layer is not None:
             # When we stop at an early layer, we end here rather than doing further computation
