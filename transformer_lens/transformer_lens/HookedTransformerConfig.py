@@ -134,6 +134,7 @@ class HookedTransformerConfig:
     eps: float = 1e-5
     use_attn_result: bool = False
     use_attn_scale: bool = True
+    use_split_qkv_input: bool = False
     use_local_attn: bool = False
     original_architecture: Optional[str] = None
     from_checkpoint: bool = False
