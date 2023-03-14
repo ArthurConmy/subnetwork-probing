@@ -27,11 +27,13 @@ NamesFilter = Optional[Union[Callable[[str], bool], Sequence[str]]]
 # I can wrap any intermediate activation in a HookPoint and get a convenient
 # way to add PyTorch hooks
 class HookPoint(nn.Module):
-    def __init__(self):
+    def __init__(self, global_cache=None):
         super().__init__()
         self.fwd_hooks: List[LensHandle] = []
         self.bwd_hooks: List[LensHandle] = []
         self.ctx = {}
+        if global_cache is not None:
+            self.global_cache = global_cache
 
         # A variable giving the hook's name (from the perspective of the root
         # module) - this is set by the root module at setup.
@@ -96,8 +98,8 @@ class HookPoint(nn.Module):
 
 
 class MaskedHookPoint(HookPoint):
-    def __init__(self, mask_shape, name, mask_p=0.9, is_mlp=False):
-        super().__init__()
+    def __init__(self, mask_shape, name, mask_p=0.9, is_mlp=False, global_cache=None):
+        super().__init__(global_cache=global_cache)
         self.training = True  # assume always training for now
         self.mask_scores = torch.nn.Parameter(torch.ones(mask_shape))
         self.beta = (

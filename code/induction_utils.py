@@ -318,6 +318,7 @@ def get_induction_model() -> HookedTransformer:
         # rotary_dim: Optional[int] = None
         # n_params: Optional[int] = None
         # use_hook_tokens: bool = False
+        use_global_cache = True,
     )
 
     et_model = transformer_lens.HookedTransformer(cfg, is_masked=True)

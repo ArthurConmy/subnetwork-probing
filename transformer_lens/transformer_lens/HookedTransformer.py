@@ -42,6 +42,10 @@ class Output(NamedTuple):
     loss: Loss
 
 
+class GlobalCache:
+    def __init__(self):
+        self.acts = {}
+
 class HookedTransformer(HookedRootModule):
     """
     This class implements a full Transformer using the components in ./components.py, with
@@ -95,21 +99,26 @@ class HookedTransformer(HookedRootModule):
             self.cfg.d_vocab = max(self.tokenizer.vocab.values()) + 1
         if self.cfg.d_vocab_out == -1:
             self.cfg.d_vocab_out = self.cfg.d_vocab
+            is_this_still_super_slow = no # lol
 
-            is_this_still_super_slow = no
-        self.embed = Embed(self.cfg)
-        self.hook_embed = HookPoint()  # [batch, pos, d_model]
+        if self.cfg.use_global_cache:
+            self.global_cache = global_cache = GlobalCache()
+        else:
+            self.global_cache = global_cache = None
+
+        self.embed = Embed(self.cfg, global_cache=self.global_cache)
+        self.hook_embed = HookPoint(global_cache=global_cache)  # [batch, pos, d_model]
 
         if self.cfg.positional_embedding_type != "rotary":
             self.pos_embed = PosEmbed(self.cfg)
-            self.hook_pos_embed = HookPoint()  # [batch, pos, d__dictmodel]
+            self.hook_pos_embed = HookPoint(global_cache=global_cache)  # [batch, pos, d__dictmodel]
 
         if self.cfg.use_hook_tokens:
-            self.hook_tokens = HookPoint()  # [batch, pos]
+            self.hook_tokens = HookPoint(global_cache=global_cache)  # [batch, pos]
 
         self.blocks = nn.ModuleList(
             [
-                TransformerBlock(self.cfg, is_masked, block_index)
+                TransformerBlock(self.cfg, is_masked, block_index, global_cache=global_cache)
                 for block_index in range(self.cfg.n_layers)
             ]
         )
