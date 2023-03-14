@@ -163,7 +163,7 @@ def train_induction(
 
     wandb.init(
         project="subnetwork-probing",
-        entity="acdcremix",
+        entity="remix_school-of-rock", 
         config={"epochs": epochs, "mask_lr": mask_lr, "lambda_reg": lambda_reg},
     )
     (
@@ -371,7 +371,7 @@ if __name__ == "__main__":
     # make sure that the model makes correct predictions
     # brainstorm more
     #
-    wandb.init(project="pareto-subnetwork-probing", entity="acdcremix")
+    wandb.init(project="pareto-subnetwork-probing", entity="remix_school-of-rock")
     import plotly.express as px
 
     df = pd.DataFrame(
