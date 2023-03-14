@@ -477,10 +477,8 @@ def get_ACDC_correspondece():
     from interp.circuit.causal_scrubbing.hypothesis import corr_root_matcher
     from interp.circuit.interop_rust.model_rewrites import To, configure_transformer
     from interp.circuit.interop_rust.module_library import load_model_id
-    import sys
-
-    sys.path.insert(1, "/home/ubuntu/mlab2_https/mlab2/")
-    from remix_d5_acdc_utils import (
+    import os
+    from mlab2.remix_d5_acdc_utils import (
         ACDCCorrespondence,
         ACDCExperiment,
         ACDCInterpNode,
@@ -497,7 +495,7 @@ def get_ACDC_correspondece():
     from torch.testing import assert_close
     import random
     import pickle
-    import remix_d3_test as tests
+    import mlab2.remix_d3_test as tests
 
     MAIN = __name__ == "__main__"
 
