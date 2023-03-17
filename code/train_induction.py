@@ -156,9 +156,10 @@ def do_random_resample_caching(
 
 #%% [markdown]
 # will become train edge induction, but for now prototype in notebook
-model = model = get_induction_model()
+model = get_induction_model()
 model.set_use_split_qkv_input(True)
 model.set_use_attn_result(True)
+model.cfg
 
 #%%
 
@@ -166,6 +167,7 @@ model.set_use_attn_result(True)
 for hp in model.hook_dict.values():
     if isinstance(hp, MaskedHookPoint):
         hp.is_disabled = True
+
 #%%
 
 # verify that:
@@ -196,9 +198,9 @@ for name in model.hook_dict:
 bad_logits = model(patch_data_tensor)
 model.reset_hooks()
 
-model.corrupt_cache = {k: v.cpu() for k, v in corrupt_cache.items()}
-del corrupt_cache
-torch.cuda.empty_cache()
+model.global_cache.corrupt_cache = {k: v.cpu() for k, v in corrupt_cache.items()}
+# del corrupt_cache
+# torch.cuda.empty_cache()
 
 #%%
 
@@ -227,15 +229,16 @@ for sender in all_senders:
 
 names_senders = list(set([name for name, _ in all_senders]))
 
-def saver_hook(z, hook):
-    hook.global_cache[hook.name] = z
-    return z
+# def saver_hook(z, hook):
+#     print("saverhooking")
+#     hook.global_cache[hook.name] = z
+#     return z
 
-for name in names_senders:
-    model.add_hook(
-        name=name,
-        hook=saver_hook,
-    )
+# for name in names_senders:
+#     model.add_hook(
+#         name=name,
+#         hook=saver_hook,
+#     )
 
 #%%
 
@@ -249,6 +252,7 @@ def editor_hook(z, hook):
     curz = z.clone() 
 
     for sender, slice_tuple in receivers_to_senders[hook.name]:
+        print("inna looop")
         slice_slice = slice(*slice_tuple)
         curz[slice_tuple] -= hook.global_cache[sender][slice_slice]
         curz += hook.global_cache.corrupt_cache[sender][slice_slice]
@@ -256,24 +260,29 @@ def editor_hook(z, hook):
     print(hook.name, curz.norm().item())
     return curz
 
-all_receivers = list(receivers_to_senders.keys())
-all_receivers_names = [name for name, _ in all_receivers]
-
+# all_receivers = list(receivers_to_senders.keys())
+# all_receivers_names = [name for name, _ in all_receivers]
+names_senders=['blocks.0.attn.hook_result',
+'blocks.1.attn.hook_result',
+'blocks.0.hook_resid_pre']
 model.reset_hooks()
 hooks=[]
-for name in all_receivers_names:
+for name in names_senders: # all_receivers_names:
     # hooks.append((name, editor_hook))
     model.add_hook(
         name=name,
         hook=editor_hook,
     )
 
-assert len(model.hook_dict[all_receivers_names[-1]].fwd_hooks) > 0, (all_receivers_names[-1], "should surely have had a hook added")
+assert len(model.hook_dict[names_senders[-1]].fwd_hooks) > 0, (names_senders[-1], "should surely have had a hook added")
 
 #%%
 
-out = model(train_data_tensor)
-#     fwd_hooks = hooks,
+out=model(train_data_tensor)
+
+# out = model.run_with_hooks(
+#     train_data_tensor,
+#     fwd_hooks=hooks,
 # )
 
 assert False, "WHY IS THERE NO PRINTING OUT OF NORMS HERE???"

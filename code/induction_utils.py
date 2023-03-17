@@ -318,10 +318,18 @@ def get_induction_model() -> HookedTransformer:
         # rotary_dim: Optional[int] = None
         # n_params: Optional[int] = None
         # use_hook_tokens: bool = False
-        use_global_cache = True,
     )
 
-    et_model = transformer_lens.HookedTransformer(cfg, is_masked=True)
+    if "subnetwork-probing" in str(transformer_lens.__file__):
+        cfg.use_global_cache = True
+    else:
+        pass
+
+    kwargs = {"cfg": cfg}
+    if "subnetwork-probing" in str(transformer_lens.__file__):
+        kwargs["is_masked"] = True
+
+    et_model = transformer_lens.HookedTransformer(**kwargs)
 
     # embed.W_E torch.Size([50259, 256]) True
     et_model.embed.W_E.data = new_circuit.get_unique("t.w.tok_embeds").evaluate()

@@ -328,16 +328,14 @@ class HookedTransformer(HookedRootModule):
         for i, block in enumerate(transformer_block_list):  # type: ignore
             # Note that each block includes skip connections, so we don't need
             # residual + block(residual)
-            try:
-                residual = block(
-                    residual,
-                    past_kv_cache_entry=past_kv_cache[i]
-                    if past_kv_cache is not None
-                    else None,  # Cache is contains a list of HookedTransformerKeyValueCache objects, one for each block
-                    shortformer_pos_embed=shortformer_pos_embed,
-                )  # [batch, pos, d_model]
-            except:
-                pass
+            residual = block(
+                residual,
+                past_kv_cache_entry=past_kv_cache[i]
+                if past_kv_cache is not None
+                else None,  # Cache is contains a list of HookedTransformerKeyValueCache objects, one for each block
+                shortformer_pos_embed=shortformer_pos_embed,
+            )  # [batch, pos, d_model]
+
 
         if stop_at_layer is not None:
             # When we stop at an early layer, we end here rather than doing further computation
