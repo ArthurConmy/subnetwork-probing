@@ -905,6 +905,3 @@ def convert_node_name(node_name: str) -> str:
     node_name = node_name.replace("a", "")
     node_name = node_name.replace("h", "")
     return node_name
-
-
-#%%

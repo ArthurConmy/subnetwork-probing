@@ -155,6 +155,7 @@ def do_random_resample_caching(
     return model
 
 #%% [markdown]
+
 # will become train edge induction, but for now prototype in notebook
 model = get_induction_model()
 model.set_use_split_qkv_input(True)
@@ -204,26 +205,57 @@ model.global_cache.corrupt_cache = {k: v.cpu() for k, v in corrupt_cache.items()
 
 #%%
 
-receivers_to_senders = OrderedDict()
+receivers_to_senders = OrderedDict() # TODO typehint
 all_senders = [
     ("blocks.0.hook_resid_pre", (None,)),
 ]
 
+def create_slicer(tup):
+    def slicer(z):
+        if len(tup) == 1:
+            if tup[0] is None:
+                return z
+            else:
+                return z[tup[0]]
+        
+        elif len(tup) == 2:
+            assert tup[0] is None
+            return z[:, tup[1]]
+
+        elif len(tup) == 3:
+            assert tup[0] is None
+            assert tup[1] is None
+            return z[:, :, tup[2]]
+
+        elif len(tup) == 4:
+            assert tup[0] is None
+            assert tup[1] is None
+            assert tup[2] is None
+            return z[:, :, :, tup[3]]
+        
+        else:
+            raise ValueError("tup too long", f"{len(tup)=}", f"{tup=}")
+
+    return slicer
+
 for layer_index in range(model.cfg.n_layers):
     for head_index in range(model.cfg.n_heads):
         for letter in "qkv":
-            receiver = (f"blocks.{layer_index}.hook_{letter}_input", (None, None, head_index))
-            receivers_to_senders[receiver] = []
+            receiver_name = f"blocks.{layer_index}.hook_{letter}_input"
+            receiver_slice_tuple = (None, None, head_index)
+            receivers_to_senders[receiver_name] = {}
+            receivers_to_senders[receiver_name][receiver_slice_tuple] = []
             for sender in all_senders:
-                receivers_to_senders[receiver].append(sender)
+                receivers_to_senders[receiver_name][receiver_slice_tuple].append(sender)
     finally_the_sender = f"blocks.{layer_index}.attn.hook_result"
     for head_index in range(model.cfg.n_heads):
         all_senders.append((finally_the_sender, (None, None, head_index)))
 
-receiver = (f"blocks.{model.cfg.n_layers-1}.hook_resid_post", (None,))
-receivers_to_senders[receiver] = []
+receiver_name = f"blocks.{model.cfg.n_layers-1}.hook_resid_post"
+receiver_slice_tuple = (None,)
+receivers_to_senders[receiver_name] = {}
 for sender in all_senders:
-    receivers_to_senders[receiver].append(sender)
+    receivers_to_senders[receiver_name][receiver_slice_tuple] = [sender] # .append(sender)
 
 #%%
 
@@ -251,30 +283,38 @@ td = model(train_data_tensor)
 def editor_hook(z, hook):
     curz = z.clone() 
 
-    for sender, slice_tuple in receivers_to_senders[hook.name]:
-        print("inna looop")
-        slice_slice = slice(*slice_tuple)
-        curz[slice_tuple] -= hook.global_cache[sender][slice_slice]
-        curz += hook.global_cache.corrupt_cache[sender][slice_slice]
-    
+    for receiver_tuple_slice in receivers_to_senders[hook.name]:
+        receiver_slicer = create_slicer(receiver_tuple_slice)
+        for sender_name, sender_tuple_slice in receivers_to_senders[hook.name][receiver_tuple_slice]:
+            sender_slicer = create_slicer(sender_tuple_slice)
+            warnings.warn("Add this back when you have saving_hook working")
+            # curz[slice_slice] -= hook.global_cache[sender_name][slice_slice]
+
+            try:
+                tens = receiver_slicer(curz)
+                tens += sender_slicer(hook.global_cache.corrupt_cache[sender_name]).to(tens.device)
+                warnings.warn("So far this must use the same tensor for what all heads send from a layer")
+            except:
+                import IPython; IPython.embed()
+
     print(hook.name, curz.norm().item())
     return curz
 
-# all_receivers = list(receivers_to_senders.keys())
-# all_receivers_names = [name for name, _ in all_receivers]
-names_senders=['blocks.0.attn.hook_result',
+all_receivers_names = list(receivers_to_senders.keys())
+names_senders = ['blocks.0.attn.hook_result',
 'blocks.1.attn.hook_result',
 'blocks.0.hook_resid_pre']
-model.reset_hooks()
 hooks=[]
-for name in names_senders: # all_receivers_names:
+
+model.reset_hooks()
+for name in all_receivers_names:
     # hooks.append((name, editor_hook))
     model.add_hook(
         name=name,
         hook=editor_hook,
     )
 
-assert len(model.hook_dict[names_senders[-1]].fwd_hooks) > 0, (names_senders[-1], "should surely have had a hook added")
+assert len(model.hook_dict[all_receivers_names[-1]].fwd_hooks) > 0, (all_receivers_names[-1], "should surely have had a hook added")
 
 #%%
 
