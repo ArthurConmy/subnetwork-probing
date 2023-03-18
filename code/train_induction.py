@@ -15,6 +15,7 @@ from tqdm import tqdm
 from transformer_lens.HookedTransformer import HookedTransformer
 from transformer_lens.hook_points import HookPoint, MaskedHookPoint
 from transformer_lens.ioi_dataset import IOIDataset
+from transformer_lens.utils import make_nd_dict
 from induction_utils import (
     get_induction_dataset,
     get_induction_model,
@@ -196,19 +197,17 @@ def norm_peeker(z, hook):
     return z
 for name in model.hook_dict:
     model.add_hook(name, norm_peeker)
+
 bad_logits = model(patch_data_tensor)
 model.reset_hooks()
 
 model.global_cache.corrupt_cache = {k: v.cpu() for k, v in corrupt_cache.items()}
-# del corrupt_cache
-# torch.cuda.empty_cache()
 
 #%%
 
-receivers_to_senders = OrderedDict() # TODO typehint
-all_senders = [
-    ("blocks.0.hook_resid_pre", (None,)),
-]
+receivers_to_senders = make_nd_dict(list[tuple], n = 3)
+all_senders = defaultdict(list[tuple])
+all_senders["blocks.0.hook_resid_pre"] = [(None,)]
 
 def create_slicer(tup):
     def slicer(z):
@@ -239,76 +238,68 @@ def create_slicer(tup):
     return slicer
 
 for layer_index in range(model.cfg.n_layers):
-    for head_index in range(model.cfg.n_heads):
-        for letter in "qkv":
-            receiver_name = f"blocks.{layer_index}.hook_{letter}_input"
+    for letter in "qkv":
+        receiver_name = f"blocks.{layer_index}.hook_{letter}_input"
+        for head_index in range(model.cfg.n_heads):
             receiver_slice_tuple = (None, None, head_index)
-            receivers_to_senders[receiver_name] = {}
-            receivers_to_senders[receiver_name][receiver_slice_tuple] = []
-            for sender in all_senders:
-                receivers_to_senders[receiver_name][receiver_slice_tuple].append(sender)
+            for sender_name in all_senders:
+                for sender_slice_tuple in all_senders[sender_name]:
+                    # TODO make this sender tuple an object of its own for type reasons
+                    receivers_to_senders[receiver_name][receiver_slice_tuple][sender_name].append(sender_slice_tuple)
     finally_the_sender = f"blocks.{layer_index}.attn.hook_result"
     for head_index in range(model.cfg.n_heads):
-        all_senders.append((finally_the_sender, (None, None, head_index)))
+        all_senders[finally_the_sender].append((None, None, head_index))
 
 receiver_name = f"blocks.{model.cfg.n_layers-1}.hook_resid_post"
 receiver_slice_tuple = (None,)
-receivers_to_senders[receiver_name] = {}
-for sender in all_senders:
-    receivers_to_senders[receiver_name][receiver_slice_tuple] = [sender] # .append(sender)
+for sender_name in all_senders:
+    for sender_slice_tuple in all_senders[sender_name]:
+        receivers_to_senders[receiver_name][receiver_slice_tuple][sender_name].append(sender_slice_tuple)
 
-#%%
-
-names_senders = list(set([name for name, _ in all_senders]))
-
-# def saver_hook(z, hook):
-#     print("saverhooking")
-#     hook.global_cache[hook.name] = z
-#     return z
-
-# for name in names_senders:
-#     model.add_hook(
-#         name=name,
-#         hook=saver_hook,
-#     )
-
-#%%
-
-# test run to see what happens, do things actually save
-td = model(train_data_tensor)
+names_senders = list(all_senders.keys())
 
 #%% 
+
+def saver_hook(z, hook):
+    print("SAVERHOOKING")
+    hook.global_cache[hook.name] = z.cpu()
+    return z
+
+all_senders
+
+model.reset_hooks()
+for name in names_senders:
+    model.add_hook(
+        name=name,
+        hook=saver_hook,
+    )
 
 # do a mini test: if we use all the patched activations, what happens?
 def editor_hook(z, hook):
     curz = z.clone() 
-
     for receiver_tuple_slice in receivers_to_senders[hook.name]:
         receiver_slicer = create_slicer(receiver_tuple_slice)
-        for sender_name, sender_tuple_slice in receivers_to_senders[hook.name][receiver_tuple_slice]:
-            sender_slicer = create_slicer(sender_tuple_slice)
-            warnings.warn("Add this back when you have saving_hook working")
-            # curz[slice_slice] -= hook.global_cache[sender_name][slice_slice]
-
-            try:
+        for sender_name in receivers_to_senders[hook.name][receiver_tuple_slice]:
+            for sender_tuple_slice in receivers_to_senders[hook.name][receiver_tuple_slice][sender_name]:
+                sender_slicer = create_slicer(sender_tuple_slice)
                 tens = receiver_slicer(curz)
-                tens += sender_slicer(hook.global_cache.corrupt_cache[sender_name]).to(tens.device)
+                clean_part_factor = hook.global_cache.parameters[hook.name][receiver_tuple_slice][sender_name][sender_tuple_slice]
+                removed_clean_part = clean_part_factor * sender_slicer(hook.global_cache[sender_name].to(tens.device)) # don't do inplace things
+
+                tens = tens - removed_clean_part
+                corrupted_part_factor = 1 - clean_part_factor
+                tens = tens + corrupted_part_factor * sender_slicer(hook.global_cache.corrupt_cache[sender_name].to(tens.device))
+
+                # tens += sender_slicer(hook.global_cache.corrupt_cache[sender_name]).to(tens.device)
                 warnings.warn("So far this must use the same tensor for what all heads send from a layer")
-            except:
-                import IPython; IPython.embed()
 
     print(hook.name, curz.norm().item())
     return curz
 
 all_receivers_names = list(receivers_to_senders.keys())
-names_senders = ['blocks.0.attn.hook_result',
-'blocks.1.attn.hook_result',
-'blocks.0.hook_resid_pre']
-hooks=[]
 
-model.reset_hooks()
+hooks = []
 for name in all_receivers_names:
-    # hooks.append((name, editor_hook))
     model.add_hook(
         name=name,
         hook=editor_hook,
@@ -316,16 +307,44 @@ for name in all_receivers_names:
 
 assert len(model.hook_dict[all_receivers_names[-1]].fwd_hooks) > 0, (all_receivers_names[-1], "should surely have had a hook added")
 
+#%% [markdown]
+# Setup optimization
+
+parameters = []
+
+num_params = 0
+for receiver_name in receivers_to_senders:
+    for receiver_tuple_slice in receivers_to_senders[receiver_name]:
+        for sender_name in receivers_to_senders[receiver_name][receiver_tuple_slice]:
+            for sender_slice_tuple in receivers_to_senders[receiver_name][receiver_tuple_slice][sender_name]:
+                num_params += 1
+                parameter = torch.nn.Parameter(torch.zeros(1, requires_grad=True, device=model.global_cache.device))
+                model.global_cache.parameters[receiver_name][receiver_tuple_slice][sender_name][sender_slice_tuple] = parameter
+                parameters.append(parameter)
+
+mask_lr = 0.01
+optimizer = torch.optim.Adam(parameters, lr=mask_lr)
+
+print("We're working with", num_params, "parameters")
+model.global_cache.init_weights()
+#%% [markdown]
+# Begin a forward pass
+# sample the parameter values
+
+model.global_cache.sample_mask()
+
 #%%
 
 out=model(train_data_tensor)
 
-# out = model.run_with_hooks(
-#     train_data_tensor,
-#     fwd_hooks=hooks,
-# )
+#%%
 
-assert False, "WHY IS THERE NO PRINTING OUT OF NORMS HERE???"
+loss = out.norm()
+loss.backward()
+
+#%%
+
+optimizer.step()
 
 #%%
 

@@ -32,6 +32,7 @@ from transformer_lens.components import *
 import transformer_lens.loading_from_pretrained as loading
 from transformer_lens.torchtyping_helper import T
 import transformer_lens.utils as utils
+from transformer_lens.utils import make_nd_dict
 
 SingleLoss = TT[()]  # Type alias for a single element tensor
 LossPerToken = TT["batch", "position - 1"]
@@ -44,8 +45,12 @@ class Output(NamedTuple):
 
 
 class GlobalCache(dict):
-    def __init__(self):
+    def __init__(self, subnetwork_probing = True, device = "cuda"):
+        # TODO find a way to make the device propagate when we to .to on the p
         self.corrupt_cache = None
+        self.sampled_mask = None
+        self.device = device
+
         # self.params = {
         #   {receiver: {sender: param, ...}} # oh boy so many dictionaries
         # }
@@ -55,11 +60,80 @@ class GlobalCache(dict):
         # and a list of things to load...
         # don't do the QKV version for now. So also need to run naive ACDC version that is just on the heads...
 
-def sample_mask_param(param): # where does this go???
-    pass
+        if subnetwork_probing:
+            self.parameters = make_nd_dict(torch.nn.Parameter, n=4)
+            self.sampled_mask = make_nd_dict(torch.Tensor, n=4)
+            self.beta = 2/3
+            self.gamma = -0.1
+            self.zeta = 1.1
+            self.mask_p = 0.9
+            # self.name = name
+            # self.is_mlp = is_mlp
+            # self.init_weights() # need to init weights after setting up the actual dict items
 
-def hook_func(z, hook):
-    pass
+    #     self.is_caching = False
+    #     self.is_disabled = is_disabled
+    #     self.cache = None            
+
+    def clear(self):
+        self.corrupt_cache = None
+        for key in self.parameters.keys():
+            del self.parameters[key]
+        for key in self.sampled_mask.keys():
+            del self.sampled_mask[key]
+        for key in self.keys():
+            del self[key]
+
+    def to(self, device):
+        assert isinstance(device, str), "TODO implement this for non-strings"
+        
+        # move all the parameters
+        for receiver_name in self.parameters:
+            for receiver_slice_tuple in self.parameters[receiver_name]:
+                for sender_name in self.parameters[receiver_name][receiver_slice_tuple]:
+                    for sender_slice_tuple in self.parameters[receiver_name][receiver_slice_tuple][sender_name]:
+                        self.parameters[receiver_name][receiver_slice_tuple][sender_name][sender_slice_tuple] = self.parameters[receiver_name][receiver_slice_tuple][sender_name][sender_slice_tuple].to(device)
+        
+        # move all the sampled masks
+        for receiver_name in self.sampled_mask:
+            for receiver_slice_tuple in self.sampled_mask[receiver_name]:
+                for sender_name in self.sampled_mask[receiver_name][receiver_slice_tuple]:
+                    for sender_slice_tuple in self.sampled_mask[receiver_name][receiver_slice_tuple][sender_name]:
+                        self.sampled_mask[receiver_name][receiver_slice_tuple][sender_name][sender_slice_tuple] = self.sampled_mask[receiver_name][receiver_slice_tuple][sender_name][sender_slice_tuple].to(device)
+        
+        return self
+
+
+    def init_weights(self):
+        """
+        Augustine: this is how they initialise (their code pasted)
+        """
+        p = (self.mask_p - self.gamma) / (self.zeta - self.gamma)
+        
+        for receiver_name in self.parameters:
+            for receiver_slice_tuple in self.parameters[receiver_name]:
+                for sender_name in self.parameters[receiver_name][receiver_slice_tuple]:
+                    for sender_slice_tuple in self.parameters[receiver_name][receiver_slice_tuple][sender_name]:
+                        assert isinstance(self.parameters[receiver_name][receiver_slice_tuple][sender_name][sender_slice_tuple], torch.nn.Parameter)
+                        torch.nn.init.constant_(self.parameters[receiver_name][receiver_slice_tuple][sender_name][sender_slice_tuple], val=np.log(p / (1 - p)))
+
+    def sample_mask(self):
+        """Mostly copilot code for nesting these 4 loops..."""
+        for receiver_name in self.parameters:
+            warnings.warn("Probably we want a better way to clear this sampled mask thing each run")
+            for receiver_slice_tuple in self.parameters[receiver_name]:
+                for sender_name in self.parameters[receiver_name][receiver_slice_tuple]:
+                    for sender_slice_tuple in self.parameters[receiver_name][receiver_slice_tuple][sender_name]:
+                        uniform_sample = (
+                            torch.zeros([1]).uniform_().clamp(0.0001, 0.9999)
+                        )
+                        s = torch.sigmoid(
+                            ((uniform_sample.log() - (1 - uniform_sample).log()).item() + self.parameters[receiver_name][receiver_slice_tuple][sender_name][sender_slice_tuple])
+                            / self.beta
+                        )
+                        s_bar = s * (self.zeta - self.gamma) + self.gamma
+                        mask = s_bar.clamp(min=0.0, max=1.0)
+                        self.sampled_mask[receiver_name][receiver_slice_tuple][sender_name][sender_slice_tuple] = mask
 
 class HookedTransformer(HookedRootModule):
     """
@@ -117,7 +191,7 @@ class HookedTransformer(HookedRootModule):
             is_this_still_super_slow = no # lol
 
         if self.cfg.use_global_cache:
-            self.global_cache = global_cache = GlobalCache()
+            self.global_cache = global_cache = GlobalCache(device=cfg.device)
         else:
             self.global_cache = global_cache = None
 
@@ -637,6 +711,10 @@ class HookedTransformer(HookedRootModule):
         elif isinstance(device_or_dtype, torch.dtype):
             if print_details:
                 print("Changing model dtype to", device_or_dtype)
+        
+        if self.global_cache is not None:
+            self.global_cache.to(device_or_dtype)
+
         return nn.Module.to(self, device_or_dtype)
 
     def cuda(self):

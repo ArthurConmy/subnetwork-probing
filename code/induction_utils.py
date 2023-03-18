@@ -16,6 +16,7 @@ from interp.tools.indexer import TORCH_INDEXER as I
 from interp.tools.rrfs import RRFS_DIR
 from transformer_lens import HookedTransformer
 from typing import Dict
+from transformer_lens.utils import make_nd_dict
 
 
 def get_induction_dataset():

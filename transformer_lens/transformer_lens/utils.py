@@ -18,10 +18,21 @@ from rich import print as rprint
 
 from transformer_lens import FactoredMatrix
 from transformer_lens.torchtyping_helper import T
+from collections import defaultdict
 
 CACHE_DIR = transformers.TRANSFORMERS_CACHE
 import json
 
+
+def make_nd_dict(end_type, n = 3):
+    if n not in [3, 4]:
+        raise NotImplementedError("Only implemented for 3/4")
+        
+    if n == 3:
+        return defaultdict(lambda: defaultdict(lambda: defaultdict(end_type)))
+
+    if n == 4:
+        return defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(end_type))))
 
 def download_file_from_hf(
     repo_name, file_name, subfolder=".", cache_dir=CACHE_DIR, force_is_torch=False
