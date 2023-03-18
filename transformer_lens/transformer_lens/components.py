@@ -7,7 +7,7 @@ import einops
 import logging
 
 from functools import *
-
+import warnings
 from transformer_lens.hook_points import HookPoint, MaskedHookPoint
 from transformer_lens.utils import gelu_new, solu, gelu_fast
 from transformer_lens.HookedTransformerConfig import HookedTransformerConfig
@@ -700,7 +700,8 @@ class TransformerBlock(nn.Module):
 
         if self.cfg.use_split_qkv_input:
             def add_head_dimension(tensor):
-                return einops.repeat(tensor, "batch pos d_model -> batch pos n_heads d_model", n_heads=self.cfg.n_heads).clone()
+                warnings.warn("Removing clone so maybe gradients flow???")
+                return einops.repeat(tensor, "batch pos d_model -> batch pos n_heads d_model", n_heads=self.cfg.n_heads)
 
             query_input = self.hook_q_input(add_head_dimension(query_input))
             key_input = self.hook_k_input(add_head_dimension(key_input))

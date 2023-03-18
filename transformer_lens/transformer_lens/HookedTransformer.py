@@ -124,6 +124,9 @@ class GlobalCache(dict):
             for receiver_slice_tuple in self.parameters[receiver_name]:
                 for sender_name in self.parameters[receiver_name][receiver_slice_tuple]:
                     for sender_slice_tuple in self.parameters[receiver_name][receiver_slice_tuple][sender_name]:
+
+                        print(self.parameters[receiver_name][receiver_slice_tuple][sender_name][sender_slice_tuple].item(), end=" and ") # don't seem to change : (
+
                         uniform_sample = (
                             torch.zeros([1]).uniform_().clamp(0.0001, 0.9999)
                         )
@@ -134,6 +137,9 @@ class GlobalCache(dict):
                         s_bar = s * (self.zeta - self.gamma) + self.gamma
                         mask = s_bar.clamp(min=0.0, max=1.0)
                         self.sampled_mask[receiver_name][receiver_slice_tuple][sender_name][sender_slice_tuple] = mask
+                        print(mask.item(), end=", ")
+
+        print()
 
 class HookedTransformer(HookedRootModule):
     """

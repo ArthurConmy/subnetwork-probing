@@ -17,7 +17,11 @@ from interp.tools.rrfs import RRFS_DIR
 from transformer_lens import HookedTransformer
 from typing import Dict
 from transformer_lens.utils import make_nd_dict
+import time
 
+def ct():
+    """Readable and filename friendly current time 8 hours ahead"""
+    return time.ctime().replace(" ", "_").replace(":", "_")
 
 def get_induction_dataset():
     try:
@@ -865,7 +869,7 @@ def get_ACDC_correspondece():
 
 def compute_no_edges_in_transformer_lens(nodes_to_mask):
     """
-    copied from ACDC code
+    Copied from ACDC code
     """
     nodes_to_mask = [
         i.replace("_", ".").replace("layer.", "").replace("head.", "")
@@ -887,7 +891,7 @@ def compute_no_edges_in_transformer_lens(nodes_to_mask):
 
 def add_hierarchy_nodes(nodes_to_mask):
     """
-    copied from ACDC code
+    Copied from ACDC code
     """
     unique_hierarchy_nodes = set(
         [i.replace(".q", "").replace(".k", "").replace(".v", "") for i in nodes_to_mask]
@@ -906,3 +910,6 @@ def convert_node_name(node_name: str) -> str:
     node_name = node_name.replace("a", "")
     node_name = node_name.replace("h", "")
     return node_name
+
+# %%
+

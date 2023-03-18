@@ -8,6 +8,7 @@ import pandas as pd
 import torch
 import warnings
 import torch.nn.functional as F
+import plotly.graph_objects as go
 import transformer_lens.utils as utils
 import wandb
 from interp.circuit.causal_scrubbing.dataset import Dataset
@@ -32,11 +33,11 @@ BASE_MODEL_PROBS = compute_base_model_probs()
 BASE_MODEL_PROBS = BASE_MODEL_PROBS.detach()
 
 
-def log_plotly_bar_chart(x: List[str], y: List[float]) -> None:
+def log_plotly_bar_chart(x: List[str], y: List[float], name = "mask_scores") -> None:
     import plotly.graph_objects as go
 
     fig = go.Figure(data=[go.Bar(x=x, y=y)])
-    wandb.log({"mask_scores": fig})
+    wandb.log({name: fig})
 
 
 def visualize_mask(model: HookedTransformer) -> None:
@@ -138,22 +139,23 @@ def kl_divergence(dataset: Dataset, logits: torch.Tensor, mask_reshaped: torch.T
     return kl_div.sum() / denom
 
 
-def do_random_resample_caching(
-    model: HookedTransformer, train_data: torch.Tensor
-) -> HookedTransformer:
-    for layer in model.blocks:
-        layer.attn.hook_q.is_caching = True
-        layer.attn.hook_k.is_caching = True
-        layer.attn.hook_v.is_caching = True
+if False: # I think the resampled points can and should be fixed ... ?
+    def do_random_resample_caching(
+        model: HookedTransformer, train_data: torch.Tensor
+    ) -> HookedTransformer:
+        for layer in model.blocks:
+            layer.attn.hook_q.is_caching = True
+            layer.attn.hook_k.is_caching = True
+            layer.attn.hook_v.is_caching = True
 
-    _ = model(train_data)
+        _ = model(train_data) # !!!
 
-    for layer in model.blocks:
-        layer.attn.hook_q.is_caching = False
-        layer.attn.hook_k.is_caching = False
-        layer.attn.hook_v.is_caching = False
+        for layer in model.blocks:
+            layer.attn.hook_q.is_caching = False
+            layer.attn.hook_k.is_caching = False
+            layer.attn.hook_v.is_caching = False
 
-    return model
+        return model
 
 #%% [markdown]
 
@@ -209,6 +211,43 @@ receivers_to_senders = make_nd_dict(list[tuple], n = 3)
 all_senders = defaultdict(list[tuple])
 all_senders["blocks.0.hook_resid_pre"] = [(None,)]
 
+for layer_index in range(model.cfg.n_layers):
+    for letter in "qkv":
+        receiver_name = f"blocks.{layer_index}.hook_{letter}_input"
+        for head_index in range(model.cfg.n_heads):
+            receiver_slice_tuple = (None, None, head_index)
+            for sender_name in all_senders:
+                for sender_slice_tuple in all_senders[sender_name]:
+                    # TODO make this sender tuple an object of its own for type reasons
+                    receivers_to_senders[receiver_name][receiver_slice_tuple][sender_name].append(sender_slice_tuple)
+    finally_the_sender = f"blocks.{layer_index}.attn.hook_result"
+    for head_index in range(model.cfg.n_heads):
+        all_senders[finally_the_sender].append((None, None, head_index))
+
+receiver_name = f"blocks.{model.cfg.n_layers-1}.hook_resid_post"
+receiver_slice_tuple = (None,)
+for sender_name in all_senders:
+    for sender_slice_tuple in all_senders[sender_name]:
+        receivers_to_senders[receiver_name][receiver_slice_tuple][sender_name].append(sender_slice_tuple)
+
+names_senders = list(all_senders.keys())
+
+#%% 
+
+def saver_hook(z, hook):
+    print("SAVERHOOKING")
+    hook.global_cache[hook.name] = z # crucial that this is THE TRUE THING so gradinets flooooow
+    return z
+
+all_senders
+
+model.reset_hooks()
+for name in names_senders:
+    model.add_hook(
+        name=name,
+        hook=saver_hook,
+    )
+
 def create_slicer(tup):
     def slicer(z):
         if len(tup) == 1:
@@ -237,64 +276,42 @@ def create_slicer(tup):
 
     return slicer
 
-for layer_index in range(model.cfg.n_layers):
-    for letter in "qkv":
-        receiver_name = f"blocks.{layer_index}.hook_{letter}_input"
-        for head_index in range(model.cfg.n_heads):
-            receiver_slice_tuple = (None, None, head_index)
-            for sender_name in all_senders:
-                for sender_slice_tuple in all_senders[sender_name]:
-                    # TODO make this sender tuple an object of its own for type reasons
-                    receivers_to_senders[receiver_name][receiver_slice_tuple][sender_name].append(sender_slice_tuple)
-    finally_the_sender = f"blocks.{layer_index}.attn.hook_result"
-    for head_index in range(model.cfg.n_heads):
-        all_senders[finally_the_sender].append((None, None, head_index))
-
-receiver_name = f"blocks.{model.cfg.n_layers-1}.hook_resid_post"
-receiver_slice_tuple = (None,)
-for sender_name in all_senders:
-    for sender_slice_tuple in all_senders[sender_name]:
-        receivers_to_senders[receiver_name][receiver_slice_tuple][sender_name].append(sender_slice_tuple)
-
-names_senders = list(all_senders.keys())
-
-#%% 
-
-def saver_hook(z, hook):
-    print("SAVERHOOKING")
-    hook.global_cache[hook.name] = z.cpu()
-    return z
-
-all_senders
-
-model.reset_hooks()
-for name in names_senders:
-    model.add_hook(
-        name=name,
-        hook=saver_hook,
-    )
-
 # do a mini test: if we use all the patched activations, what happens?
 def editor_hook(z, hook):
-    curz = z.clone() 
     for receiver_tuple_slice in receivers_to_senders[hook.name]:
         receiver_slicer = create_slicer(receiver_tuple_slice)
+        # assert False, "Change all these create slicer things into inline slices..."
         for sender_name in receivers_to_senders[hook.name][receiver_tuple_slice]:
             for sender_tuple_slice in receivers_to_senders[hook.name][receiver_tuple_slice][sender_name]:
                 sender_slicer = create_slicer(sender_tuple_slice)
-                tens = receiver_slicer(curz)
-                clean_part_factor = hook.global_cache.parameters[hook.name][receiver_tuple_slice][sender_name][sender_tuple_slice]
-                removed_clean_part = clean_part_factor * sender_slicer(hook.global_cache[sender_name].to(tens.device)) # don't do inplace things
+                hook.tens = receiver_slicer(z)
+                hook.tens.retain_grad()
+                print(hook.tens.norm(), "tens1", end=" ")
+                hook.clean_part_factor = hook.global_cache.sampled_mask[hook.name][receiver_tuple_slice][sender_name][sender_tuple_slice]
+                hook.clean_part_factor.retain_grad()
+                hook.removed_clean_part = hook.clean_part_factor * sender_slicer(hook.global_cache[sender_name]) # don't do inplace things ughhhh but inplace things are punishing us! 
+                hook.removed_clean_part.retain_grad()
 
-                tens = tens - removed_clean_part
-                corrupted_part_factor = 1 - clean_part_factor
-                tens = tens + corrupted_part_factor * sender_slicer(hook.global_cache.corrupt_cache[sender_name].to(tens.device))
+                hook.tens = hook.tens - hook.removed_clean_part
+                hook.corrupted_part_factor = 1 - hook.clean_part_factor
+                hook.corrupted_part_factor.retain_grad()
+                hook.tens = hook.tens + hook.corrupted_part_factor * sender_slicer(hook.global_cache.corrupt_cache[sender_name].to(hook.tens.device))
+                hook.tens.retain_grad()
+                print(hook.tens.norm(), "tens2", end=" ")
+
+                if len(receiver_tuple_slice) == 1:
+                    z = hook.tens
+                else:
+                    assert len(receiver_tuple_slice) == 3
+                    assert None == receiver_tuple_slice[0] == receiver_tuple_slice[1]
+                    z = torch.cat((z[:, :, :receiver_tuple_slice[2]], hook.tens.unsqueeze(2), z[:, :, receiver_tuple_slice[2]+1:]), dim=2) 
+                    # shoutout to GPT-4 fo the above line
 
                 # tens += sender_slicer(hook.global_cache.corrupt_cache[sender_name]).to(tens.device)
                 warnings.warn("So far this must use the same tensor for what all heads send from a layer")
 
-    print(hook.name, curz.norm().item())
-    return curz
+    print(hook.name, z.norm().item())
+    return z
 
 all_receivers_names = list(receivers_to_senders.keys())
 
@@ -308,59 +325,43 @@ for name in all_receivers_names:
 assert len(model.hook_dict[all_receivers_names[-1]].fwd_hooks) > 0, (all_receivers_names[-1], "should surely have had a hook added")
 
 #%% [markdown]
-# Setup optimization
 
-parameters = []
-
-num_params = 0
-for receiver_name in receivers_to_senders:
-    for receiver_tuple_slice in receivers_to_senders[receiver_name]:
-        for sender_name in receivers_to_senders[receiver_name][receiver_tuple_slice]:
-            for sender_slice_tuple in receivers_to_senders[receiver_name][receiver_tuple_slice][sender_name]:
-                num_params += 1
-                parameter = torch.nn.Parameter(torch.zeros(1, requires_grad=True, device=model.global_cache.device))
-                model.global_cache.parameters[receiver_name][receiver_tuple_slice][sender_name][sender_slice_tuple] = parameter
-                parameters.append(parameter)
-
-mask_lr = 0.01
-optimizer = torch.optim.Adam(parameters, lr=mask_lr)
-
-print("We're working with", num_params, "parameters")
-model.global_cache.init_weights()
-#%% [markdown]
 # Begin a forward pass
 # sample the parameter values
 
-model.global_cache.sample_mask()
+if False:
+    out=model(train_data_tensor)
+
+    assert list(out.shape) == list(bad_logits.shape), f"{out.shape} != {bad_logits.shape}"
+    assert torch.allclose(out, bad_logits), (out.norm(), bad_logits.norm())
 
 #%%
 
-out=model(train_data_tensor)
+# commented out so we can access variables in notebook
+# def train_induction(
+#     model, mask_lr=0.01, epochs=30, verbose=True, lambda_reg=100,
+# ):
 
-#%%
+if True: # in notebook not function
+    mask_lr = 0.1
+    warnings.warn("Turn mask_lr down once issue fixed...")
+    epochs = 300
+    lambda_reg = 100
+    verbose = True
 
-loss = out.norm()
-loss.backward()
+    from induction_utils import ct
 
-#%%
+    fcontents = ""
+    with open(__file__, "r") as f:
+        fcontent = f.read()
 
-optimizer.step()
-
-#%%
-
-assert list(out.shape) == list(bad_logits.shape), f"{out.shape} != {bad_logits.shape}"
-assert torch.allclose(out, bad_logits), (out.norm(), bad_logits.norm())
-
-#%%
-
-def train_induction(
-    model, mask_lr=0.01, epochs=30, verbose=True, lambda_reg=100,
-):
-
+    run_name = f"run_{ct()}"
     wandb.init(
-        project="subnetwork-probing",
+        name=run_name,
+        project="subnetwork_probing_edges",
         entity="remix_school-of-rock", 
         config={"epochs": epochs, "mask_lr": mask_lr, "lambda_reg": lambda_reg},
+        notes=fcontent,
     )
     (
         train_data_tensor,
@@ -371,54 +372,150 @@ def train_induction(
         mask_reshaped,
     ) = get_induction_dataset()
 
-    # one parameter per thing that is masked
-    mask_params = [
-        p
-        for n, p in model.named_parameters()
-        if "mask_scores" in n and p.requires_grad
-    ]
-    # parameters for the probe (we don't use a probe)
-    model_params = [
-        p
-        for n, p in model.named_parameters()
-        if "mask_scores" not in n and p.requires_grad
-    ]
-    assert len(model_params) == 0, ("MODEL should be empty", model_params)
-    trainer = torch.optim.Adam(mask_params, lr=mask_lr)
-    log = []
+    # # one parameter per thing that is masked
+    # mask_params = [
+    #     p
+    #     for n, p in model.named_parameters()
+    #     if "mask_scores" in n and p.requires_grad
+    # ]
+    # # parameters for the probe (we don't use a probe)
+    # model_params = [
+    #     p
+    #     for n, p in model.named_parameters()
+    #     if "mask_scores" not in n and p.requires_grad
+    # ]
 
-    for epoch in tqdm(range(epochs)):  # tqdm.notebook.tqdm(range(epochs)):
-        model = do_random_resample_caching(model, patch_data_tensor)
+    # with torch.set_grad_enabled(True):
+    if True: # above didn't help
+        mask_params = []
+        for receiver_name in receivers_to_senders:
+            for receiver_tuple_slice in receivers_to_senders[receiver_name]:
+                for sender_name in receivers_to_senders[receiver_name][receiver_tuple_slice]:
+                    for sender_slice_tuple in receivers_to_senders[receiver_name][receiver_tuple_slice][sender_name]:
+                        parameter = torch.nn.Parameter(torch.zeros(1, requires_grad=True, device=model.global_cache.device))
+                        parameter.retain_grad()
+                        model.global_cache.parameters[receiver_name][receiver_tuple_slice][sender_name][sender_slice_tuple] = parameter
+                        mask_params.append(parameter)
+        print("Working with", len(mask_params), "parameters")
+
+        # optimizer = torch.optim.Adam(parameters, lr=mask_lr)
+
+        model.global_cache.init_weights()
+        trainer = torch.optim.Adam(mask_params, lr=mask_lr)
+        log = []
         model.train()
-        trainer.zero_grad()
-        # compute loss, also log other metrics
-        # logit_diff_term = negative_log_probs(
-        #     dataset, model(train_data_tensor), mask_reshaped
-        # )
-        logit_diff_term = kl_divergence(
-            dataset, model(train_data_tensor), mask_reshaped
-        )
-        regularizer_term = regularizer(model)
-        loss = logit_diff_term + regularizer_term * lambda_reg
-        loss.backward()
+        torch.autograd.set_detect_anomaly(True)
 
-        wandb.log(
-            {
-                "regularisation_loss": regularizer_term,
-                "KL_loss": logit_diff_term,
-                "total_loss": loss,
-            }
-        )
-        trainer.step()
+        for epoch in tqdm(range(epochs)):  # tqdm.notebook.tqdm(range(epochs)):
+            # model = do_random_resample_caching(model, patch_data_tensor)
 
-        log.append({"loss_val": loss.item()})
+            trainer.zero_grad()
+            model.global_cache.sample_mask()
 
-        if epoch % 10 == 0:
-            number_of_nodes, nodes_to_mask = visualize_mask(model)
-    # wandb.finish()
-    # torch.save(model.state_dict(), "masked_model.pt")
-    return log, model, number_of_nodes, logit_diff_term, nodes_to_mask
+            # compute loss, also log other metrics
+            # logit_diff_term = negative_log_probs(
+            #     dataset, model(train_data_tensor), mask_reshaped
+            # )
+            
+            warnings.warn("TODO: make sure to update to the KL divergence")
 
+            if True:
+                for n, p in model.named_parameters():
+                    p.retain_grad()
+                logits = model(train_data_tensor)
+                labels = dataset.arrs["labels"].evaluate()
+                probs = F.softmax(logits, dim=-1)
+
+                assert probs.min() >= 0.0
+                assert probs.max() <= 1.0
+
+                log_probs = probs[
+                    torch.arange(NUM_EXAMPLES).unsqueeze(-1),
+                    torch.arange(SEQ_LEN).unsqueeze(0),
+                    labels,
+                ].log()
+
+                assert mask_reshaped.shape == log_probs.shape, (
+                    mask_reshaped.shape,
+                    log_probs.shape,
+                )
+                denom = mask_reshaped.int().sum().item()
+
+                masked_log_probs = log_probs * mask_reshaped.int()
+                masked_log_probs.retain_grad()
+                result = (-1.0 * (masked_log_probs.sum())) / denom
+                result.retain_grad()
+
+                print("Result", result, denom)
+
+                logit_diff_term = result
+                # logit_diff_term.retain_grad()
+                # return result
+
+            else:
+                logit_diff_term = negative_log_probs( # OK sure all loss named logit_diff
+                    dataset, model(train_data_tensor), mask_reshaped
+                )
+
+            warnings.warn("TODO: add regularizer")
+            regularizer_term = None
+            # regularizer_term = regularizer(model)
+            # loss = logit_diff_term + regularizer_term * lambda_reg
+            loss = logit_diff_term
+            loss.backward()
+            wandb.log(
+                {
+                    "regularisation_loss": regularizer_term,
+                    "KL_loss": logit_diff_term,
+                    "total_loss": loss,
+                }
+            )
+            trainer.step() # doesn't affect
+            log.append({"loss_val": loss.item()})
+
+            # for p in mask_params:
+            #     pval = p.item()
+            #     # show 2 DPs
+            #     pval = round(pval, 2)
+            #     print(pval, end=" ")
+
+            # bar chart
+            xs = []
+            ms = []
+            ps = []
+
+            for recevier_name in model.global_cache.sampled_mask:
+                for receiver_tuple_slice in model.global_cache.sampled_mask[recevier_name]:
+                    for sender_name in model.global_cache.sampled_mask[recevier_name][receiver_tuple_slice]:
+                        for sender_slice_tuple in model.global_cache.sampled_mask[recevier_name][receiver_tuple_slice][sender_name]:
+                            # print(recevier_name, receiver_tuple_slice, sender_name, sender_slice_tuple)
+                            m = model.global_cache.sampled_mask[recevier_name][receiver_tuple_slice][sender_name][sender_slice_tuple]
+                            p = model.global_cache.parameters[recevier_name][receiver_tuple_slice][sender_name][sender_slice_tuple]
+                            mval = m.item()
+                            pval = p.item()
+
+                            xs.append(recevier_name + " " + str(receiver_tuple_slice) + " " + sender_name + " " + str(sender_slice_tuple))
+                            ms.append(mval)
+                            ps.append(pval)
+
+                            # show 2 DPs
+                            mval = round(mval, 2)
+                            print(mval, end=" ")
+        
+            log_plotly_bar_chart(xs, ms, name="mask_scores")
+            log_plotly_bar_chart(xs, ps, name="parameter_values")
+
+            warnings.warn("TODO: implement this ... ?")
+            # if epoch % 10 == 0:
+            #     number_of_nodes, nodes_to_mask = visualize_mask(model)
+
+
+    wandb.finish()
+    warnings.warn("Add back in return statements")
+    # return log, model, number_of_nodes, logit_diff_term, nodes_to_mask
+
+#%% [markdown]
+# Rest of Augustine's file 
 
 # check regularizer can set all the
 def sanity_check_with_transformer_lens(mask_dict):
@@ -494,43 +591,12 @@ def get_nodes_mask_dict(model: HookedTransformer):
                 mask_value_dict[f"{layer_index}.{head_index}.{q_k_v}"] = mask_value
     return mask_value_dict
 
+#%%
 
 if __name__ == "__main__":
     model = get_induction_model()
-    regularization_params = [
-        # 1e-2,
-        # 1e-1,
-        # 1e1,
-        # 20,
-        # 40,
-        # 50,
-        # 55,
-        # 60,
-        # 65,
-        # 70,
-        # 80,
-        # 100,
-        # 120,
-        # 140,
-        # 160,
-        # 180,
-        # 200,
-        # 250,
-        # 300,
-        # 310,
-        # 320,
-        # 330,
-        # 350,
-        # 360,
-        # 370,
-        # 380,
-        # 400,
-        # 500,
-        # 600,
+    regularization_params = [ # TODO fix this ...
         700,
-        # 800,
-        # 900,
-        # 1e3,
     ]
 
     is_masked = True
