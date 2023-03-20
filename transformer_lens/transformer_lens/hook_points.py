@@ -120,7 +120,7 @@ class MaskedHookPoint(HookPoint):
         this is how they initialise (their code pasted)
         """
         p = (self.mask_p - self.gamma) / (self.zeta - self.gamma)
-        torch.nn.init.constant_(self.mask_scores, val=np.log(p / (1 - p)))
+        torch.nn.init.constant_(self.mask_scores, val=1)  # np.log(p / (1 - p)))
 
     def sample_mask(self):
         # reparam trick taken from their code
@@ -134,6 +134,16 @@ class MaskedHookPoint(HookPoint):
         s_bar = s * (self.zeta - self.gamma) + self.gamma
         mask = s_bar.clamp(min=0.0, max=1.0)
         return mask
+
+    def report_head_importance(self, x):
+        mask = self.sample_mask()
+        broadcasted_mask_scores = einops.repeat(
+            mask,
+            "a b -> (a c) (b d)",
+            c=x.shape[2] // self.mask_scores.shape[0],
+            d=x.shape[3] // self.mask_scores.shape[1],
+        )
+        return torch.abs(broadcasted_mask_scores * self.mask_scores.grad)
 
     def forward(self, x):
 
@@ -166,12 +176,12 @@ class MaskedHookPoint(HookPoint):
                     c=x.shape[2] // self.mask_scores.shape[0],
                     d=x.shape[3] // self.mask_scores.shape[1],
                 )
-            interpolation = (1 - broadcasted_mask_scores) * self.cache.to(
-                "cuda:0"
-            ) + broadcasted_mask_scores * x
+            # interpolation = (1 - broadcasted_mask_scores) * self.cache.to(
+            #     "cuda:0"
+            # ) + broadcasted_mask_scores * x
 
-            return interpolation
-            # return broadcasted_mask_scores * x
+            # return interpolation
+            return broadcasted_mask_scores * x
 
 
 # %%

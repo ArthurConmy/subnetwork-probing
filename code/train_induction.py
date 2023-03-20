@@ -158,12 +158,11 @@ def do_random_resample_caching(
 
 
 def train_induction(
-    induction_model, mask_lr=0.01, epochs=30, verbose=True, lambda_reg=100,
+    induction_model, mask_lr=0.001, epochs=30, verbose=True, lambda_reg=100,
 ):
 
     wandb.init(
         project="subnetwork-probing",
-        entity="acdcremix",
         config={"epochs": epochs, "mask_lr": mask_lr, "lambda_reg": lambda_reg},
     )
     (
@@ -302,39 +301,45 @@ def get_nodes_mask_dict(model: HookedTransformer):
 if __name__ == "__main__":
     model = get_induction_model()
     regularization_params = [
-        # 1e-2,
-        # 1e-1,
-        # 1e1,
-        # 20,
-        # 40,
-        # 50,
-        # 55,
-        # 60,
-        # 65,
-        # 70,
-        # 80,
-        # 100,
-        # 120,
-        # 140,
-        # 160,
-        # 180,
-        # 200,
-        # 250,
-        # 300,
-        # 310,
-        # 320,
-        # 330,
-        # 350,
-        # 360,
-        # 370,
-        # 380,
-        # 400,
-        # 500,
-        # 600,
+        1e-9,
+        1e-8,
+        1e-7,
+        1e-5,
+        1e-4,
+        1e-3,
+        1e-2,
+        1e-1,
+        1e1,
+        20,
+        40,
+        50,
+        55,
+        60,
+        65,
+        70,
+        80,
+        100,
+        120,
+        140,
+        160,
+        180,
+        200,
+        250,
+        300,
+        310,
+        320,
+        330,
+        350,
+        360,
+        370,
+        380,
+        400,
+        500,
+        600,
         700,
-        # 800,
-        # 900,
-        # 1e3,
+        800,
+        900,
+        1e3,
     ]
 
     is_masked = True
@@ -351,7 +356,9 @@ if __name__ == "__main__":
             log, model, number_of_nodes, logit_diff, nodes_to_mask = train_induction(
                 deepcopy(model), lambda_reg=a_regulation_param
             )
-            print("nodes to mask", nodes_to_mask)
+            for _ in range(100):
+                print("nodes to mask", nodes_to_mask)
+                print("number of nodes", number_of_nodes)
             logit_diff_list.append(logit_diff)
             number_of_nodes_list.append(number_of_nodes)
             mask_val_dict = get_nodes_mask_dict(model)
@@ -371,12 +378,12 @@ if __name__ == "__main__":
     # make sure that the model makes correct predictions
     # brainstorm more
     #
-    wandb.init(project="pareto-subnetwork-probing", entity="acdcremix")
+    wandb.init(project="pareto-subnetwork-probing")
     import plotly.express as px
 
     df = pd.DataFrame(
         {
-            "x": np.log(number_of_edges),
+            "x": number_of_edges,
             "y": [i.detach().cpu().item() for i in logit_diff_list],
             "regularization_params": regularization_params,
             "percentage_binary": percentage_binary_list,
