@@ -12,8 +12,14 @@ from transformer_lens.HookedTransformer import HookedTransformer
 from transformer_lens.ioi_dataset import IOIDataset
 
 from classifiers import NERModel, POSModel, UDModel
-from subnetwork_datasets import (build_vocab, evaluate, load_conllu, load_ner,
-                                 masked_loss, sent_avgs)
+from subnetwork_datasets import (
+    build_vocab,
+    evaluate,
+    load_conllu,
+    load_ner,
+    masked_loss,
+    sent_avgs,
+)
 from util import from_numpy, partial_state_dict
 
 N = 100
