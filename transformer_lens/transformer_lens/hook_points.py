@@ -9,6 +9,7 @@ import numpy as np
 from functools import *
 
 from dataclasses import dataclass
+import einops
 
 
 @dataclass
@@ -119,7 +120,7 @@ class MaskedHookPoint(HookPoint):
         """
         this is how they initialise (their code pasted)
         """
-        p = (self.mask_p - self.gamma) / (self.zeta - self.gamma)
+        # p = (self.mask_p - self.gamma) / (self.zeta - self.gamma)
         torch.nn.init.constant_(self.mask_scores, val=1)  # np.log(p / (1 - p)))
 
     def sample_mask(self):
@@ -135,7 +136,7 @@ class MaskedHookPoint(HookPoint):
         mask = s_bar.clamp(min=0.0, max=1.0)
         return mask
 
-    def report_head_importance(self, x):
+    def report_head_importance(self):
         mask = self.sample_mask()
         broadcasted_mask_scores = einops.repeat(
             mask,
@@ -154,7 +155,6 @@ class MaskedHookPoint(HookPoint):
             self.cache = x.cpu()
             return x
         else:
-            import einops
 
             if not self.is_mlp:
                 assert x.shape[2] % self.mask_scores.shape[0] == 0

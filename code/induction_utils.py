@@ -16,6 +16,7 @@ from interp.tools.indexer import TORCH_INDEXER as I
 from interp.tools.rrfs import RRFS_DIR
 from transformer_lens import HookedTransformer
 from typing import Dict
+from interp.circuit.causal_scrubbing.dataset import Dataset
 
 
 def get_induction_dataset():
@@ -900,4 +901,64 @@ def convert_node_name(node_name: str) -> str:
     return node_name
 
 
-#%%
+
+class IDataset(Dataset):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+    
+    def t(self):
+        return self.arrs["tokens"].value
+
+    def l(self):
+        return self.arrs["labels"].value
+
+def get_prompts_dataset():
+    """Taken from Aengus code"""
+    import prompts_file
+    import rust_circuit as rc
+    import transformer_lens
+    from interp.circuit.projects.gpt2_gen_induction.rust_path_patching import make_arr
+
+    other_device_dtype = rc.TorchDeviceDtype("cuda:0", "float32")
+    tokens_device_dtype = rc.TorchDeviceDtype("cuda:0", "int64")
+
+    et_model = transformer_lens.HookedTransformer.from_pretrained(model_name="attn-only-4l", is_masked=False)
+    # Stefan Heimersheim
+    batch_size=50
+    # random.seed(0)
+
+    docstring_ind_prompt_kwargs = dict(
+        n_matching_args=3,
+        n_def_prefix_args=2,
+        n_def_suffix_args=1,
+        n_doc_prefix_args=0,
+        met_desc_len=3,
+        arg_desc_len=2
+    )
+
+    prompts = [prompts_file.docstring_induction_prompt_generator("rest", **docstring_ind_prompt_kwargs) for _ in range(batch_size)]
+    batched_prompts = prompts_file.BatchedPrompts(prompts=prompts, model=et_model)
+
+
+    # DATASET SETUP
+    N = batched_prompts.clean_tokens.shape[0]
+    seq_len = batched_prompts.clean_tokens.shape[1]
+
+    assert (N, seq_len) == (50, 41)
+
+    default_data = make_arr(
+        batched_prompts.clean_tokens.cpu(),
+        # ioi_dataset.toks.long()[:N, : seq_len - 1],
+        "tokens",
+        device_dtype=tokens_device_dtype,
+    )
+    patch_data = make_arr(
+        batched_prompts.corrupt_tokens["random_doc"].cpu(),
+        # abc_Dataset.toks.long()[:N, : seq_len - 1],
+        "tokens",
+        device_dtype=tokens_device_dtype,
+    )
+    default_ds = IDataset({"tokens": default_data})
+    patch_ds = IDataset({"tokens": patch_data})
+    return default_ds, patch_ds
+
