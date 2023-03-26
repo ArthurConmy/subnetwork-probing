@@ -1,22 +1,40 @@
+# import os
+
+# os.chdir("/home/ubuntu/mlab2_https/mlab2/")
+
+from copy import deepcopy
 from functools import partial
 from typing import Dict, List
 
-import IPython
 import numpy as np
-import plotly
+import pandas as pd
 import torch
 import torch.nn.functional as F
 import transformer_lens.utils as utils
 import wandb
+from interp.circuit.causal_scrubbing.dataset import Dataset
+from tqdm import tqdm
 from transformer_lens.HookedTransformer import HookedTransformer
 from transformer_lens.ioi_dataset import IOIDataset
 
-from classifiers import NERModel, POSModel, UDModel
-from subnetwork_datasets import (build_vocab, evaluate, load_conllu, load_ner,
-                                 masked_loss, sent_avgs)
-from util import from_numpy, partial_state_dict
+from induction_utils import (
+    get_prompts_dataset_and_model,
+    compute_no_edges_in_transformer_lens,
+)
+import transformer_lens
 
-N = 100
+(
+    input_data,
+    patch_data,
+    _,
+) = get_prompts_dataset_and_model()  # dont use this model cause its masked
+base_model = transformer_lens.HookedTransformer.from_pretrained(
+    model_name="attn-only-4l", is_masked=False
+)
+BASE_MODEL_PROBS = F.softmax(base_model(input_data.tokens.value).detach(), dim=-1)
+NUMBER_OF_LAYERS = 4
+NUMBER_OF_HEADS = 8
+# BASE_MODEL_PROBS =
 
 
 def log_plotly_bar_chart(x: List[str], y: List[float]) -> None:
@@ -26,33 +44,43 @@ def log_plotly_bar_chart(x: List[str], y: List[float]) -> None:
     wandb.log({"mask_scores": fig})
 
 
-def visualize_mask(gpt2: HookedTransformer) -> None:
-    node_name = []
+def visualize_mask(model: HookedTransformer) -> None:
+    node_name_list = []
     mask_scores_for_names = []
     total_nodes = 0
     nodes_to_mask = []
-    for layer_index, layer in enumerate(gpt2.blocks):
-        for head in range(12):
+    for layer_index, layer in enumerate(model.blocks):
+        for head_index in range(NUMBER_OF_HEADS):
             for q_k_v in ["q", "k", "v"]:
                 total_nodes += 1
                 if q_k_v == "q":
-
-                    if layer.attn.hook_q.sample_mask()[layer_index].cpu().item() < 0.5:
-                        nodes_to_mask.append(f"{layer_index}.{head}.{q_k_v}")
+                    mask_sample = (
+                        layer.attn.hook_q.sample_mask()[head_index].cpu().item()
+                    )
                 if q_k_v == "k":
-                    if layer.attn.hook_k.sample_mask()[layer_index].cpu().item() < 0.5:
-                        nodes_to_mask.append(f"{layer_index}.{head}.{q_k_v}")
+                    mask_sample = (
+                        layer.attn.hook_k.sample_mask()[head_index].cpu().item()
+                    )
                 if q_k_v == "v":
-                    if layer.attn.hook_v.sample_mask()[layer_index].cpu().item() < 0.5:
-                        nodes_to_mask.append(f"{layer_index}.{head}.{q_k_v}")
+                    mask_sample = (
+                        layer.attn.hook_v.sample_mask()[head_index].cpu().item()
+                    )
+                node_name = f"layer_{layer_index}_head_{head_index}_{q_k_v}"
+                node_name_list.append(node_name)
+                mask_scores_for_names.append(
+                    layer.attn.hook_v.mask_scores[head_index].cpu().item()
+                )
+                if mask_sample < 0.5:
+                    nodes_to_mask.append(node_name)
 
-    log_plotly_bar_chart(x=node_name, y=mask_scores_for_names)
+    assert len(mask_scores_for_names) == 3 * NUMBER_OF_HEADS * NUMBER_OF_LAYERS
+    log_plotly_bar_chart(x=node_name_list, y=mask_scores_for_names)
     node_count = total_nodes - len(nodes_to_mask)
     return node_count, nodes_to_mask
 
 
 def regularizer(
-    gpt2: HookedTransformer,
+    model: HookedTransformer,
     gamma: float = -0.1,
     zeta: float = 1.1,
     beta: float = 2 / 3,
@@ -65,118 +93,137 @@ def regularizer(
 
     mask_scores = [
         regularization_term(p)
-        for (n, p) in gpt2.named_parameters()
+        for (n, p) in model.named_parameters()
         if "mask_scores" in n
     ]
     return torch.mean(torch.stack(mask_scores))
 
 
-def logit_diff_from_ioi_dataset(
-    logits: torch.Tensor, tokens: torch.Tensor, mean=False,
-):
-    assert tokens.shape == (
-        N,
-        16,
-    ), tokens.shape  # TODO check this is not breaking things...
-    assert len(logits.shape) == 3, logits.shape
+def negative_log_probs(
+    dataset: Dataset, logits: torch.Tensor, mask_reshaped: torch.Tensor
+) -> float:
+    """NOTE: this average over all sequence positions, I'm unsure why..."""
+    labels = dataset.arrs["labels"].evaluate()
+    probs = F.softmax(logits, dim=-1)
 
-    io_labels = tokens[:, 2]
-    s_labels = tokens[:, 4]
+    assert probs.min() >= 0.0
+    assert probs.max() <= 1.0
 
-    io_logits = logits[torch.arange(N), -2, io_labels]
-    s_logits = logits[torch.arange(N), -2, s_labels]
+    log_probs = probs[
+        torch.arange(NUM_EXAMPLES).unsqueeze(-1),
+        torch.arange(SEQ_LEN).unsqueeze(0),
+        labels,
+    ].log()
 
-    logit_diff = io_logits - s_logits
-    if mean:
-        return logit_diff.mean()
-    else:
-        return logit_diff
+    assert mask_reshaped.shape == log_probs.shape, (
+        mask_reshaped.shape,
+        log_probs.shape,
+    )
+    denom = mask_reshaped.int().sum().item()
+
+    masked_log_probs = log_probs * mask_reshaped.int()
+    result = (-1.0 * (masked_log_probs.sum())) / denom
+
+    print("Result", result, denom)
+    return result
+
+
+def kl_divergence(logits: torch.Tensor,):
+    """from Aengus code"""
+    probs = F.softmax(logits, dim=-1)
+
+    assert probs.min() >= 0.0
+    assert probs.max() <= 1.0
+
+    kl_div = (BASE_MODEL_PROBS * (BASE_MODEL_PROBS.log() - probs.log())).sum(dim=-1)
+
+    return kl_div.sum() / (probs.shape[1])
 
 
 def do_random_resample_caching(
-    gpt2: HookedTransformer, train_data: torch.Tensor
+    model: HookedTransformer, train_data: torch.Tensor
 ) -> HookedTransformer:
-    for layer in gpt2.blocks:
+    for layer in model.blocks:
         layer.attn.hook_q.is_caching = True
         layer.attn.hook_k.is_caching = True
         layer.attn.hook_v.is_caching = True
 
-    _ = gpt2(train_data)
+    _ = model(train_data)
 
-    for layer in gpt2.blocks:
+    for layer in model.blocks:
         layer.attn.hook_q.is_caching = False
         layer.attn.hook_k.is_caching = False
         layer.attn.hook_v.is_caching = False
 
-    return gpt2
+    return model
 
 
-def train_ioi(
-    gpt2, mask_lr=0.01, epochs=2000, verbose=True, lambda_reg=100,
+def train_4l(
+    mask_lr=0.01, epochs=3000, verbose=True, lambda_reg=100,
 ):
+
     wandb.init(
         project="subnetwork-probing",
-        entity="acdcremix",
+        entity="remix_school-of-rock",
         config={"epochs": epochs, "mask_lr": mask_lr, "lambda_reg": lambda_reg},
     )
-    # blackbox this bit
-    ioi_dataset = IOIDataset(prompt_type="ABBA", N=N, nb_templates=1,)
-    train_data = ioi_dataset.toks.long()
-
+    input_data, patch_data, model = get_prompts_dataset_and_model()
+    input_data_tensor = input_data.tokens.evaluate()
+    patch_data_tensor = patch_data.tokens.evaluate()
+    model.freeze_weights()
     # one parameter per thing that is masked
     mask_params = [
-        p for n, p in gpt2.named_parameters() if "mask_scores" in n and p.requires_grad
+        p for n, p in model.named_parameters() if "mask_scores" in n and p.requires_grad
     ]
     # parameters for the probe (we don't use a probe)
-    gpt2_params = [
+    model_params = [
         p
-        for n, p in gpt2.named_parameters()
+        for n, p in model.named_parameters()
         if "mask_scores" not in n and p.requires_grad
     ]
-    assert len(gpt2_params) == 0, ("GPT2 should be empty", gpt2_params)
+    assert len(model_params) == 0, ("MODEL should be empty", model_params)
     trainer = torch.optim.Adam(mask_params, lr=mask_lr)
     log = []
-    from tqdm import tqdm
 
     for epoch in tqdm(range(epochs)):  # tqdm.notebook.tqdm(range(epochs)):
-        gpt2 = do_random_resample_caching(gpt2, train_data)
-        gpt2.train()
+        model = do_random_resample_caching(model, patch_data_tensor)
+        model.train()
         trainer.zero_grad()
         # compute loss, also log other metrics
-        logit_diff_term = -1.0 * logit_diff_from_ioi_dataset(
-            gpt2(train_data), train_data, mean=True
-        )
-        regularizer_term = regularizer(gpt2)
-        loss = logit_diff_term + lambda_reg * regularizer_term
+        logit_diff_term = kl_divergence(model(input_data_tensor))
+        regularizer_term = regularizer(model)
+        loss = logit_diff_term + regularizer_term * lambda_reg
         loss.backward()
 
         wandb.log(
             {
                 "regularisation_loss": regularizer_term,
-                "logit_diff_loss": logit_diff_term,
+                "KL_loss": logit_diff_term,
                 "total_loss": loss,
             }
         )
         trainer.step()
 
         log.append({"loss_val": loss.item()})
+
         if epoch % 10 == 0:
-            number_of_nodes, nodes_to_mask = visualize_mask(gpt2)
+            number_of_nodes, nodes_to_mask = visualize_mask(model)
     # wandb.finish()
-    # torch.save(gpt2.state_dict(), "masked_gpt2.pt")
-    return log, gpt2, number_of_nodes, logit_diff_term, nodes_to_mask
+    # torch.save(model.state_dict(), "masked_model.pt")
+    return log, model, number_of_nodes, logit_diff_term, nodes_to_mask
 
 
+# check regularizer can set all the
 def sanity_check_with_transformer_lens(mask_dict):
     ioi_dataset = IOIDataset(prompt_type="ABBA", N=N, nb_templates=1)
     train_data = ioi_dataset.toks.long()
-    gpt2 = HookedTransformer.from_pretrained(is_masked=False, model_name="gpt2")
-    gpt2.freeze_weights()
-    logits = gpt2(train_data)
+    model = HookedTransformer.from_pretrained(is_masked=False, model_name="model")
+    model.freeze_weights()
+    logits = model(train_data)
     logit_diff = logit_diff_from_ioi_dataset(logits, train_data, mean=True)
 
     fwd_hooks = make_forward_hooks(mask_dict)
-    logits = gpt2.run_with_hooks(train_data, return_type="logits", fwd_hooks=fwd_hooks)
+    logits = model.run_with_hooks(train_data, return_type="logits", fwd_hooks=fwd_hooks)
     logit_diff_masked = logit_diff_from_ioi_dataset(logits, train_data, mean=True)
     print("original logit diff", logit_diff)
     print("masked logit diff", logit_diff_masked)
@@ -184,8 +231,8 @@ def sanity_check_with_transformer_lens(mask_dict):
 
 def make_forward_hooks(mask_dict):
     forward_hooks = []
-    for layer in range(12):
-        for head in range(12):
+    for layer in range(NUMBER_OF_LAYERS):
+        for head in range(NUMBER_OF_HEADS):
             for qkv in ["q", "k", "v"]:
                 mask_value = mask_dict[f"{layer}.{head}.{qkv}"]
 
@@ -219,10 +266,10 @@ def log_percentage_binary(mask_val_dict: Dict) -> float:
     return binary_count / total_count
 
 
-def get_nodes_mask_dict(gpt2: HookedTransformer):
+def get_nodes_mask_dict(model: HookedTransformer):
     mask_value_dict = {}
-    for layer_index, layer in enumerate(gpt2.blocks):
-        for head_index in range(12):
+    for layer_index, layer in enumerate(model.blocks):
+        for head_index in range(NUMBER_OF_HEADS):
             for q_k_v in ["q", "k", "v"]:
                 # total_nodes += 1
                 if q_k_v == "q":
@@ -242,60 +289,84 @@ def get_nodes_mask_dict(gpt2: HookedTransformer):
 
 
 if __name__ == "__main__":
-
-    from transformer_lens.HookedTransformer import HookedTransformer
-
+    # model = get_induction_model()
     regularization_params = [
-        1e3,
-        700,
-        675,
-        650,
-        625,
-        600,
-        575,
-        525,
-        500,
-        550,
-        1e2,
-        1e0,
-        1e-1,
         1e-2,
+        1e-1,
+        1e1,
+        20,
+        40,
+        50,
+        55,
+        60,
+        65,
+        70,
+        80,
+        100,
+        120,
+        140,
+        160,
+        180,
+        200,
+        250,
+        300,
+        310,
+        320,
+        330,
+        350,
+        360,
+        370,
+        380,
+        400,
+        500,
+        600,
+        700,
+        800,
+        900,
+        1e3,
     ]
 
     is_masked = True
     logit_diff_list = []
     number_of_nodes_list = []
     percentage_binary_list = []
+    number_of_edges = []
 
     for a_regulation_param in regularization_params:
         for task in ["IOI"]:
-            gpt2 = HookedTransformer.from_pretrained(
-                is_masked=is_masked, model_name="gpt2"
-            )
-            gpt2.freeze_weights()
+            # model.freeze_weights()
             print("Finding subnetwork...")
             assert task == "IOI"
-            log, model, number_of_nodes, logit_diff, nodes_to_mask = train_ioi(
-                gpt2, lambda_reg=a_regulation_param
+            log, model, number_of_nodes, logit_diff, nodes_to_mask = train_4l(
+                lambda_reg=a_regulation_param
             )
             print("nodes to mask", nodes_to_mask)
-            logit_diff_list.append(logit_diff * -1)
+            logit_diff_list.append(logit_diff)
             number_of_nodes_list.append(number_of_nodes)
             mask_val_dict = get_nodes_mask_dict(model)
             percentage_binary = log_percentage_binary(mask_val_dict)
+            number_of_edges.append(compute_no_edges_in_transformer_lens(nodes_to_mask))
             wandb.log({"percentage_binary": percentage_binary})
             percentage_binary_list.append(percentage_binary)
-            sanity_check_with_transformer_lens(mask_val_dict)
+            # sanity_check_with_transformer_lens(mask_val_dict)
             wandb.finish()
 
-    wandb.init(project="pareto-subnetwork-probing", entity="acdcremix")
-    import pandas as pd
+    # make sure that regularizer can be optimized DONE
+    # make sure logit diff can be optimized DONE
+    # make sure that the mask is the right shape HOLD
+    # reimplement all the diagnostics that are commented out TODO
+    # reimplement sanity  check with transformer lens TODO
+    # make sure that the input data makes sense
+    # make sure that the model makes correct predictions
+    # brainstorm more
+    #
+    wandb.init(project="pareto-subnetwork-probing", entity="remix_school-of-rock")
     import plotly.express as px
 
     df = pd.DataFrame(
         {
-            "x": number_of_nodes_list,
-            "y": [i.cpu().detach().item() for i in logit_diff_list],
+            "x": np.log(number_of_edges),
+            "y": [i.detach().cpu().item() for i in logit_diff_list],
             "regularization_params": regularization_params,
             "percentage_binary": percentage_binary_list,
         }
@@ -303,6 +374,6 @@ if __name__ == "__main__":
     plt = px.scatter(
         df, x="x", y="y", hover_data=["regularization_params", "percentage_binary"]
     )
-    plt.update_layout(xaxis_title="Number of Nodes", yaxis_title="Logit Diff")
+    plt.update_layout(xaxis_title="Number of Nodes", yaxis_title="KL")
     wandb.log({"number_of_nodes": plt})
     wandb.finish()

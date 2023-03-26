@@ -912,7 +912,7 @@ class IDataset(Dataset):
     def l(self):
         return self.arrs["labels"].value
 
-def get_prompts_dataset():
+def get_prompts_dataset_and_model():
     """Taken from Aengus code"""
     import prompts_file
     import rust_circuit as rc
@@ -960,5 +960,7 @@ def get_prompts_dataset():
     )
     default_ds = IDataset({"tokens": default_data})
     patch_ds = IDataset({"tokens": patch_data})
-    return default_ds, patch_ds
+
+    et_model = transformer_lens.HookedTransformer.from_pretrained(model_name="attn-only-4l", is_masked=True)
+    return default_ds, patch_ds, et_model
 
