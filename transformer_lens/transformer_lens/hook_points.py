@@ -166,12 +166,13 @@ class MaskedHookPoint(HookPoint):
                     c=x.shape[2] // self.mask_scores.shape[0],
                     d=x.shape[3] // self.mask_scores.shape[1],
                 )
-            interpolation = (1 - broadcasted_mask_scores) * self.cache.to(
-                "cuda:0"
-            ) + broadcasted_mask_scores * x
+            # interpolation = (1 - broadcasted_mask_scores) * self.cache.to(
+            #     "cuda:0"
+            # ) + broadcasted_mask_scores * x
 
-            return interpolation
-            # return broadcasted_mask_scores * x
+            # return interpolation
+
+            return broadcasted_mask_scores * x
 
 
 # %%
