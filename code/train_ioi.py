@@ -12,11 +12,29 @@ from transformer_lens.HookedTransformer import HookedTransformer
 from transformer_lens.ioi_dataset import IOIDataset
 
 from classifiers import NERModel, POSModel, UDModel
-from subnetwork_datasets import (build_vocab, evaluate, load_conllu, load_ner,
-                                 masked_loss, sent_avgs)
+from subnetwork_datasets import (
+    build_vocab,
+    evaluate,
+    load_conllu,
+    load_ner,
+    masked_loss,
+    sent_avgs,
+)
 from util import from_numpy, partial_state_dict
 
 N = 100
+
+# SEQ_LEN = 300
+# NUM_EXAMPLES = 40
+# NUMBER_OF_HEADS = 8
+# NUMBER_OF_LAYERS = 2
+ioi_dataset = IOIDataset(prompt_type="ABBA", N=N, nb_templates=1,)
+train_data = ioi_dataset.toks.long()
+gpt2_base = HookedTransformer.from_pretrained(model_name="gpt2", is_masked=False)
+gpt2_base.freeze_weights()
+BASE_MODEL_PROBS = F.softmax(gpt2_base(train_data), dim=-1)
+# don't want to backprop through this
+BASE_MODEL_PROBS = BASE_MODEL_PROBS.detach()
 
 
 def log_plotly_bar_chart(x: List[str], y: List[float]) -> None:
@@ -71,6 +89,18 @@ def regularizer(
     return torch.mean(torch.stack(mask_scores))
 
 
+def kl_divergence(logits: torch.Tensor,):
+    """from Aengus code"""
+    probs = F.softmax(logits, dim=-1)
+
+    assert probs.min() >= 0.0
+    assert probs.max() <= 1.0
+
+    kl_div = (BASE_MODEL_PROBS * (BASE_MODEL_PROBS.log() - probs.log())).sum(dim=-1)
+
+    return kl_div.sum() / (probs.shape[1])
+
+
 def logit_diff_from_ioi_dataset(
     logits: torch.Tensor, tokens: torch.Tensor, mean=False,
 ):
@@ -112,16 +142,16 @@ def do_random_resample_caching(
 
 
 def train_ioi(
-    gpt2, mask_lr=0.01, epochs=2000, verbose=True, lambda_reg=100,
+    gpt2, mask_lr=0.01, epochs=3000, verbose=True, lambda_reg=100,
 ):
     wandb.init(
         project="subnetwork-probing",
-        entity="acdcremix",
+        entity="remix_school-of-rock",
         config={"epochs": epochs, "mask_lr": mask_lr, "lambda_reg": lambda_reg},
     )
     # blackbox this bit
-    ioi_dataset = IOIDataset(prompt_type="ABBA", N=N, nb_templates=1,)
-    train_data = ioi_dataset.toks.long()
+    # ioi_dataset = IOIDataset(prompt_type="ABBA", N=N, nb_templates=1,)
+    # train_data = ioi_dataset.toks.long()
 
     # one parameter per thing that is masked
     mask_params = [
@@ -134,7 +164,7 @@ def train_ioi(
         if "mask_scores" not in n and p.requires_grad
     ]
     assert len(gpt2_params) == 0, ("GPT2 should be empty", gpt2_params)
-    trainer = torch.optim.Adam(mask_params, lr=mask_lr)
+    trainer = torch.optim.Adam(mask_params, mask_lr)
     log = []
     from tqdm import tqdm
 
@@ -143,9 +173,10 @@ def train_ioi(
         gpt2.train()
         trainer.zero_grad()
         # compute loss, also log other metrics
-        logit_diff_term = -1.0 * logit_diff_from_ioi_dataset(
-            gpt2(train_data), train_data, mean=True
-        )
+        # logit_diff_term = -1.0 * logit_diff_from_ioi_dataset(
+        #     gpt2(train_data), train_data, mean=True
+        # )
+        logit_diff_term = kl_divergence(gpt2(train_data))
         regularizer_term = regularizer(gpt2)
         loss = logit_diff_term + lambda_reg * regularizer_term
         loss.backward()
@@ -246,19 +277,15 @@ if __name__ == "__main__":
     from transformer_lens.HookedTransformer import HookedTransformer
 
     regularization_params = [
-        1e3,
-        700,
-        675,
-        650,
-        625,
-        600,
-        575,
-        525,
-        500,
-        550,
-        1e2,
-        1e0,
-        1e-1,
+        # 1e3,
+        # 700,
+        # 600,
+        # 500,
+        # 550,
+        # 1e2,
+        # 1e1,
+        # 1e0,
+        # 1e-1,
         1e-2,
     ]
 
@@ -275,6 +302,7 @@ if __name__ == "__main__":
             gpt2.freeze_weights()
             print("Finding subnetwork...")
             assert task == "IOI"
+
             log, model, number_of_nodes, logit_diff, nodes_to_mask = train_ioi(
                 gpt2, lambda_reg=a_regulation_param
             )
@@ -288,7 +316,7 @@ if __name__ == "__main__":
             sanity_check_with_transformer_lens(mask_val_dict)
             wandb.finish()
 
-    wandb.init(project="pareto-subnetwork-probing", entity="acdcremix")
+    wandb.init(project="pareto-subnetwork-probing", entity="remix_school-of-rock")
     import pandas as pd
     import plotly.express as px
 

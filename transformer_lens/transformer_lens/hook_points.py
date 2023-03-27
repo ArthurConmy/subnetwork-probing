@@ -121,6 +121,7 @@ class MaskedHookPoint(HookPoint):
         """
         p = (self.mask_p - self.gamma) / (self.zeta - self.gamma)
         torch.nn.init.constant_(self.mask_scores, val=np.log(p / (1 - p)))
+        torch.nn.init.constant_(self.mask_scores, val=0.0)
 
     def sample_mask(self):
         # reparam trick taken from their code
@@ -133,14 +134,15 @@ class MaskedHookPoint(HookPoint):
         )
         s_bar = s * (self.zeta - self.gamma) + self.gamma
         mask = s_bar.clamp(min=0.0, max=1.0)
+        # mask = self.mask_scores
         return mask
 
     def forward(self, x):
 
         if self.is_caching:
-            # indices = list(range(len(x)))
-            # np.random.shuffle(indices)
-            # x = x[indices]
+            indices = list(range(len(x)))
+            np.random.shuffle(indices)
+            x = x[indices]
             self.cache = x.cpu()
             return x
         else:
