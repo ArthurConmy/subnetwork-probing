@@ -97,18 +97,10 @@ class HookPoint(nn.Module):
 
 
 class MaskedHookPoint(HookPoint):
-    def __init__(self, mask_shape, name, mask_p=0.9, is_mlp=False):
+    def __init__(self, mask_shape, name):
         super().__init__()
-        self.training = True  # assume always training for now
         self.mask_scores = torch.nn.Parameter(torch.ones(mask_shape))
-        self.beta = (
-            2 / 3
-        )  # TODO: make this hyperaparams globally set and synced somehow
-        self.gamma = -0.1
-        self.zeta = 1.1
-        self.mask_p = 0.9
         self.name = name
-        self.is_mlp = is_mlp
         self.init_weights()
         self.is_caching = False
         self.cache = None
@@ -117,71 +109,28 @@ class MaskedHookPoint(HookPoint):
         return super().__repr__() + f" with mask_scores {self.mask_scores}"
 
     def init_weights(self):
-        """
-        this is how they initialise (their code pasted)
-        """
-        # p = (self.mask_p - self.gamma) / (self.zeta - self.gamma)
-        torch.nn.init.constant_(self.mask_scores, val=1)  # np.log(p / (1 - p)))
+        torch.nn.init.constant_(self.mask_scores, val=1)
 
-    def sample_mask(self):
-        # reparam trick taken from their code
-        uniform_sample = (
-            torch.zeros_like(self.mask_scores).uniform_().clamp(0.0001, 0.9999)
+    def report_mask_importance(self):
+        broadcasted_mask_score_grads = einops.repeat(
+            self.mask_scores.grad,
+            "a b -> (a c) (b d)",
+            c=self.cache.shape[2] // self.mask_scores.shape[0],
+            d=self.cache.shape[3] // self.mask_scores.shape[1],
         )
-        s = torch.sigmoid(
-            (uniform_sample.log() - (1 - uniform_sample).log() + self.mask_scores)
-            / self.beta
+        return torch.mean(
+            torch.abs(broadcasted_mask_score_grads * self.cache), dim=[0, 1, 3]
         )
-        s_bar = s * (self.zeta - self.gamma) + self.gamma
-        mask = s_bar.clamp(min=0.0, max=1.0)
-        return mask
 
-    def report_head_importance(self):
-        mask = self.sample_mask()
+    def forward(self, x):
+        self.cache = torch.clone(x)
         broadcasted_mask_scores = einops.repeat(
-            mask,
+            self.mask_scores,
             "a b -> (a c) (b d)",
             c=x.shape[2] // self.mask_scores.shape[0],
             d=x.shape[3] // self.mask_scores.shape[1],
         )
-        return torch.abs(broadcasted_mask_scores * self.mask_scores.grad)
-
-    def forward(self, x):
-
-        if self.is_caching:
-            # indices = list(range(len(x)))
-            # np.random.shuffle(indices)
-            # x = x[indices]
-            self.cache = x.cpu()
-            return x
-        else:
-
-            if not self.is_mlp:
-                assert x.shape[2] % self.mask_scores.shape[0] == 0
-                assert x.shape[3] % self.mask_scores.shape[1] == 0
-                assert len(x.shape) == 4
-
-            mask = self.sample_mask()
-            if self.is_mlp:
-                broadcasted_mask_scores = einops.repeat(
-                    mask[:, 0],
-                    "a-> c d a",
-                    c=x.shape[0],
-                    d=x.shape[1],  # TODO: not confident with this, needs review
-                )
-            else:
-                broadcasted_mask_scores = einops.repeat(
-                    mask,
-                    "a b -> (a c) (b d)",
-                    c=x.shape[2] // self.mask_scores.shape[0],
-                    d=x.shape[3] // self.mask_scores.shape[1],
-                )
-            # interpolation = (1 - broadcasted_mask_scores) * self.cache.to(
-            #     "cuda:0"
-            # ) + broadcasted_mask_scores * x
-
-            # return interpolation
-            return broadcasted_mask_scores * x
+        return broadcasted_mask_scores * x
 
 
 # %%
