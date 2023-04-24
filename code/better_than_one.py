@@ -165,14 +165,19 @@ def main():
     for i in range(3 * NUMBER_OF_HEADS * NUMBER_OF_LAYERS):
         induction_model = get_induction_model()
         induction_model.freeze_weights()
+
         (
             train_data_tensor,
-            _,
+            rand_data_tensor,
             dataset,
             _,
             _,
             mask_reshaped,
         ) = get_induction_dataset()
+
+        assert induction_model.blocks[0].attn.hook_q.second_cache is None
+        induction_model(rand_data_tensor) # save to the second cache random activations
+        assert induction_model.blocks[0].attn.hook_q.second_cache is not None
 
         induction_model = get_gradients(induction_model, lambda_reg=100)
         mask_scores_dict = compute_mask_scores(model=induction_model)

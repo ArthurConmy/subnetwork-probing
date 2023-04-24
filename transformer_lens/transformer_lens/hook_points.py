@@ -104,6 +104,7 @@ class MaskedHookPoint(HookPoint):
         self.init_weights()
         self.is_caching = False
         self.cache = None
+        self.second_cache = None
 
     def __repr__(self):
         return super().__repr__() + f" with mask_scores {self.mask_scores}"
@@ -119,18 +120,24 @@ class MaskedHookPoint(HookPoint):
             d=self.cache.shape[3] // self.mask_scores.shape[1],
         )
         return torch.mean(
-            torch.abs(broadcasted_mask_score_grads * self.cache), dim=[0, 1, 3]
+            torch.abs(broadcasted_mask_score_grads * (self.cache - self.second_cache)), dim=[0, 1, 3]
         )
 
     def forward(self, x):
-        self.cache = torch.clone(x)
+
+        if self.second_cache is None:
+            self.second_cache = torch.clone(x)
+
+        else:
+            self.cache = torch.clone(x)
+
         broadcasted_mask_scores = einops.repeat(
             self.mask_scores,
             "a b -> (a c) (b d)",
             c=x.shape[2] // self.mask_scores.shape[0],
             d=x.shape[3] // self.mask_scores.shape[1],
         )
-        return broadcasted_mask_scores * x
+        return broadcasted_mask_scores * x + (-broadcasted_mask_scores + 1.0) * self.second_cache
 
 
 # %%
